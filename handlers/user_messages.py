@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Обработчики сообщений от пользователей в личке бота.
+
+Здесь происходит:
+- прием контента;
+- склейка “пачек” сообщений в один кейс;
+- проверка бана;
+- отправка кейса в админ-чат.
+"""
+
 import asyncio
 from datetime import datetime
 import time
@@ -22,16 +31,21 @@ def create_user_router(
     media_bridge: MediaBridge,
     ban_store: BanStore,
 ) -> Router:
+    """Создает роутер пользовательских входящих сообщений."""
     router = Router(name="user_messages")
+    # Буфер для media_group (альбомов): сначала накапливаем, потом отправляем разом.
     media_group_buffer: dict[tuple[int, str], list[Message]] = {}
     media_group_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
+    # Буфер "обычных" сообщений пользователя, чтобы собрать серию в один кейс.
     pending_user_messages: dict[int, list[Message]] = {}
     pending_user_tasks: dict[int, asyncio.Task[None]] = {}
+    # Глобальный lock + таймер: ограничиваем частоту отправки кейсов в админку.
     case_send_lock = asyncio.Lock()
     next_case_send_at = 0.0
     batch_window_seconds = 5.0
 
     def build_reply_context_text(message: Message) -> str:
+        """Строит текст служебного сообщения с контекстом reply (если пользователь отвечал)."""
         replied = message.reply_to_message
         if not replied:
             return "Выберите действия с анонимкой"
@@ -57,6 +71,7 @@ def create_user_router(
         return f"Выберите действия с анонимкой\n\nПользователь ответил на: {preview}"
 
     def build_tagging_content(messages: list[Message]) -> str:
+        """Собирает текст для LLM-тегирования из набора сообщений кейса."""
         chunks: list[str] = []
         for message in messages:
             text = (message.text or message.caption or "").strip()
@@ -79,6 +94,7 @@ def create_user_router(
         return "\n".join(chunks).strip()
 
     async def submit_case(messages: list[Message]) -> None:
+        """Формирует и отправляет кейс в админ-чат."""
         nonlocal next_case_send_at
         first = messages[0]
         case_id = uuid4().hex[:8]
@@ -90,11 +106,13 @@ def create_user_router(
         single_content_entities = list(first.entities or first.caption_entities or [])
         single_content_type = first.content_type
 
+        # Отправляем кейсы в админку последовательно, чтобы не ломать порядок сообщений.
         async with case_send_lock:
             now = time.monotonic()
             if now < next_case_send_at:
                 await asyncio.sleep(next_case_send_at - now)
 
+            # Одиночный кейс.
             if len(source_message_ids) == 1:
                 copied = await media_bridge.copy_single(
                     bot=first.bot,
@@ -121,6 +139,7 @@ def create_user_router(
                         single_content_type=single_content_type,
                     )
                 )
+            # Кейс из нескольких сообщений.
             else:
                 posts_count = len(source_message_ids)
                 start_marker = await first.bot.send_message(
@@ -162,15 +181,17 @@ def create_user_router(
                     )
                 )
 
+            # Подтверждение пользователю, что сообщение принято.
             await first.bot.send_message(
                 chat_id=first.chat.id,
                 text="Ваша анонимка принята!",
             )
 
-            # Limit intake to one moderation case every 5 seconds.
+            # Ограничение: не чаще одного нового кейса в 5 секунд.
             next_case_send_at = time.monotonic() + 5.0
 
     async def flush_user_batch(user_chat_id: int) -> None:
+        """Срабатывает после паузы и отправляет накопленную пачку сообщений пользователя."""
         try:
             await asyncio.sleep(batch_window_seconds)
         except asyncio.CancelledError:
@@ -184,6 +205,7 @@ def create_user_router(
             await submit_case(messages)
 
     async def enqueue_user_messages(messages: list[Message]) -> None:
+        """Кладет сообщения в буфер и перезапускает debounce-таймер."""
         if not messages:
             return
         user_chat_id = messages[0].chat.id
@@ -196,6 +218,7 @@ def create_user_router(
         )
 
     async def flush_media_group(group_key: tuple[int, str]) -> None:
+        """Собирает альбом (media_group) в единый список сообщений."""
         await asyncio.sleep(1.0)
         messages = sorted(
             media_group_buffer.pop(group_key, []),
@@ -207,8 +230,10 @@ def create_user_router(
 
     @router.message(F.chat.type == ChatType.PRIVATE)
     async def on_user_message(message: Message) -> None:
+        """Главная точка входа для сообщений пользователя в личке."""
         if not message.from_user or message.from_user.is_bot:
             return
+        # Если пользователь в бане — сразу показываем предупреждение и не принимаем кейс.
         if ban_store.is_banned(message.from_user.id):
             ban_until = ban_store.get_ban_until(message.from_user.id)
             if ban_until is None:
@@ -218,6 +243,7 @@ def create_user_router(
                 text = f"Вы временно забанены до {until_text} и не можете писать боту."
             await message.answer(text)
             return
+        # Альбомы обрабатываем через отдельный буфер.
         if message.media_group_id:
             key = (message.chat.id, message.media_group_id)
             media_group_buffer.setdefault(key, []).append(message)
@@ -226,6 +252,7 @@ def create_user_router(
                     flush_media_group(key)
                 )
             return
+        # Обычное сообщение также идет в буфер пачки.
         await enqueue_user_messages([message])
 
     return router

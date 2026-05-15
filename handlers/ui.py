@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+"""Фабрики inline-клавиатур для админских действий.
+
+Модуль отделен от бизнес-логики, чтобы проще менять интерфейс кнопок.
+"""
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from services.reject_reasons import RejectReason
 
 
 def moderation_keyboard(case_id: str) -> InlineKeyboardMarkup:
+    """Главная клавиатура кейса в админ-чате."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -35,6 +41,7 @@ def reject_reasons_keyboard(
     case_id: str,
     reasons: list[RejectReason],
 ) -> InlineKeyboardMarkup:
+    """Клавиатура с причинами отклонения (одна кнопка = одна причина)."""
     rows: list[list[InlineKeyboardButton]] = []
     for idx, reason in enumerate(reasons):
         rows.append(
@@ -49,6 +56,7 @@ def reject_reasons_keyboard(
 
 
 def tagged_preview_keyboard(case_id: str) -> InlineKeyboardMarkup:
+    """Кнопки для работы с предпросмотром тегов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -74,6 +82,12 @@ def manual_publish_tags_keyboard(
     cancel_callback: str = "pub_cancel",
     done_text: str = "Опубликовать",
 ) -> InlineKeyboardMarkup:
+    """Универсальная клавиатура мультивыбора тегов.
+
+    Используется в двух сценариях:
+    - ручная публикация без LLM;
+    - редактирование уже выбранных тегов.
+    """
     selected = {tag.lower() for tag in selected_tags}
     rows: list[list[InlineKeyboardButton]] = []
     for idx, tag in enumerate(tags):
@@ -102,6 +116,7 @@ def manual_publish_tags_keyboard(
 
 
 def ban_duration_keyboard(case_id: str) -> InlineKeyboardMarkup:
+    """Выбор длительности бана."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -135,6 +150,7 @@ def ban_duration_keyboard(case_id: str) -> InlineKeyboardMarkup:
 
 
 def ban_confirm_keyboard(case_id: str, duration_code: str) -> InlineKeyboardMarkup:
+    """Подтверждение бана после выбора срока."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -154,6 +170,7 @@ def ban_confirm_keyboard(case_id: str, duration_code: str) -> InlineKeyboardMark
 
 
 def unban_request_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Кнопка запуска процедуры разбана."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -167,6 +184,7 @@ def unban_request_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def unban_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение разбана."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [

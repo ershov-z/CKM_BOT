@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""Обработчики кнопок и сообщений админов.
+
+Это центральный модуль модерации:
+- генерация/редактирование тегов;
+- публикация;
+- отклонение;
+- ответы пользователю;
+- баны и разбаны.
+"""
+
 import asyncio
 import re
 import time
@@ -35,12 +45,15 @@ def create_admin_router(
     tagging_service: TaggingService,
     reasons_path: str,
 ) -> Router:
+    """Создает роутер админских действий."""
     router = Router(name="admin_actions")
+    # Временные буферы для сценария "ответ админа пользователю".
     reply_media_group_buffer: dict[tuple[int, str], list[Message]] = {}
     reply_media_group_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
     pending_reply_case_id: str | None = None
 
     def is_allowed_moderator(user_id: int | None) -> bool:
+        """Проверяет, что действие выполняет пользователь из whitelist модераторов."""
         return bool(user_id and user_id in settings.admin_user_ids)
 
     def ban_duration_options() -> dict[str, tuple[str, int | None]]:
@@ -54,6 +67,7 @@ def create_admin_router(
     tag_catalog_map = {tag.lower(): tag for tag in TAG_CATALOG}
 
     def normalize_tags(tags: list[str]) -> list[str]:
+        """Нормализует список тегов: canonical вид, без дублей, только из каталога."""
         result: list[str] = []
         seen: set[str] = set()
         for tag in tags:
@@ -73,13 +87,16 @@ def create_admin_router(
         return result
 
     def parse_tags_from_text(text: str) -> list[str]:
+        """Вытаскивает #теги из произвольного текста и нормализует их."""
         found = re.findall(r"#[-\wа-яА-ЯёЁ]+", text)
         return normalize_tags(found)
 
     def tags_block(case: CaseRecord) -> str:
+        """Собирает теги в многострочный блок (по одному тегу на строку)."""
         return "\n".join(case.selected_tags).strip()
 
     def compose_single_text_with_tags(case: CaseRecord) -> str:
+        """Склеивает текст одиночного поста и блок тегов."""
         base = (case.single_content_text or "").strip()
         tags = tags_block(case)
         if base and tags:
@@ -89,6 +106,7 @@ def create_admin_router(
         return base
 
     def build_tag_preview_text(case: CaseRecord) -> str:
+        """Формирует текст предпросмотра публикации (для рабочей карточки кейса)."""
         base = (case.content_for_tagging or case.single_content_text or "").strip()
         tags = tags_block(case) or "(теги не выбраны)"
         if base:
@@ -101,6 +119,7 @@ def create_admin_router(
         )
 
     def build_multi_start_text(case: CaseRecord) -> str:
+        """Служебная строка 'Начало тейка...' для кейсов из нескольких сообщений."""
         posts_count = len(case.source_message_ids)
         start_text = f"Начало тейка из нескольких постов ({posts_count}) ↓"
         current_tags = tags_block(case)
@@ -109,9 +128,11 @@ def create_admin_router(
         return start_text
 
     def media_requires_separate_tags(case: CaseRecord) -> bool:
+        """Типы, где безопаснее отправлять теги отдельным сообщением (без подписи)."""
         return case.single_content_type in {"audio", "voice", "video_note"}
 
     async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
+        """Обновляет ОДНО рабочее сообщение-карточку предпросмотра для кейса."""
         preview_text = build_tag_preview_text(case)
         entities: list[MessageEntity] | None = None
         if case.single_content_type == "text" and case.single_content_entities:
@@ -128,6 +149,7 @@ def create_admin_router(
             return
 
         try:
+            # Базовый путь: редактируем текст и кнопки уже существующего сообщения.
             await bot.edit_message_text(
                 chat_id=settings.admin_chat_id,
                 message_id=case.control_message_id,
@@ -136,8 +158,7 @@ def create_admin_router(
                 reply_markup=tagged_preview_keyboard(case.case_id),
             )
         except TelegramBadRequest:
-            # If text content cannot be edited (or is unchanged), still keep the flow
-            # on the same control message by updating buttons.
+            # fallback: если текст отредактировать нельзя, хотя бы обновим кнопки.
             await bot.edit_message_reply_markup(
                 chat_id=settings.admin_chat_id,
                 message_id=case.control_message_id,
@@ -145,6 +166,7 @@ def create_admin_router(
             )
 
     async def publish_case_with_tags(bot: Bot, case: CaseRecord) -> None:
+        """Финальная публикация кейса в канал (с учетом типа контента)."""
         if case.is_media_group:
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -194,12 +216,14 @@ def create_admin_router(
         )
 
     async def notify_user_published(bot: Bot, case: CaseRecord) -> None:
+        """Уведомляет автора, что его анонимка реально опубликована."""
         await bot.send_message(
             chat_id=case.user_chat_id,
             text="Ваша анонимка опубликована!",
         )
 
     async def disable_case_controls(bot: Bot, case: CaseRecord) -> None:
+        """Убирает inline-кнопки на рабочем сообщении кейса после завершения."""
         if case.control_message_id is None:
             return
         try:
@@ -218,6 +242,7 @@ def create_admin_router(
         note: str,
         send_case_note: bool = True,
     ) -> None:
+        """Закрывает кейс: снимает кнопки, меняет статус и пишет сервисную отметку."""
         await disable_case_controls(bot, case)
         case_store.mark_done(case.case_id, status)
         if send_case_note:
@@ -229,6 +254,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("act:"))
     async def on_action(query: CallbackQuery) -> None:
+        """Главный обработчик кнопок первой карточки кейса (act:*)."""
         if not query.from_user:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -249,6 +275,7 @@ def create_admin_router(
             return
 
         if action == "publish":
+            # Ручная публикация: сначала модератор явно выбирает теги кнопками.
             selected = normalize_tags(case.selected_tags)
             case.selected_tags = selected
             if case.control_message_id is not None:
@@ -265,6 +292,7 @@ def create_admin_router(
             return
 
         if action == "gen_tags":
+            # Авто-теги через LLM + построение/обновление предпросмотра.
             try:
                 scored = await tagging_service.score_tags(
                     case.content_for_tagging or "Пустое сообщение"
@@ -341,6 +369,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("pub_tag:"))
     async def on_publish_tag_toggle(query: CallbackQuery) -> None:
+        """Переключает тег в режиме ручной публикации."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -412,6 +441,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("pub_done:"))
     async def on_publish_done(query: CallbackQuery) -> None:
+        """Подтверждает публикацию после ручного выбора тегов."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -442,6 +472,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("tag_pub:"))
     async def on_tag_publish(query: CallbackQuery) -> None:
+        """Публикация из карточки предпросмотра (после генерации/редактирования тегов)."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -472,6 +503,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("tag_edit:"))
     async def on_tag_edit(query: CallbackQuery) -> None:
+        """Открывает интерактивное редактирование тегов кнопками."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -556,6 +588,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("edit_done:"))
     async def on_edit_done(query: CallbackQuery) -> None:
+        """Сохраняет выбранные теги и обновляет карточку предпросмотра."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -686,6 +719,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("ban_ok:"))
     async def on_ban_confirm(query: CallbackQuery) -> None:
+        """Подтверждает бан, уведомляет пользователя и пишет сервиску в админ-чат."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -719,12 +753,16 @@ def create_admin_router(
         ban_store.ban_user(case.user_chat_id, until_ts)
 
         if until_ts is None:
-            user_notice = "Вы получили бан и больше не можете писать боту."
+            user_notice = (
+                "Вы забанены и больше не можете писать боту. "
+                "Ваш аккаунт деанонимизирован для модерации."
+            )
             admin_note = "пользователь забанен навсегда."
         else:
             until_text = datetime.fromtimestamp(until_ts).strftime("%d.%m.%Y %H:%M")
             user_notice = (
-                f"Вы получили бан и не можете писать боту до {until_text}."
+                f"Вы забанены и не можете писать боту до {until_text}. "
+                "Ваш аккаунт деанонимизирован для модерации."
             )
             admin_note = f"пользователь забанен на {duration_label} (до {until_text})."
 
@@ -732,7 +770,10 @@ def create_admin_router(
         await finalize_case(query.bot, case, "banned", admin_note)
         await query.bot.send_message(
             chat_id=settings.admin_chat_id,
-            text=f"Сервис: пользователь `{case.user_chat_id}` забанен.",
+            text=(
+                f"Сервис: пользователь `{case.user_chat_id}` забанен.\n"
+                f"[Открыть профиль](tg://user?id={case.user_chat_id})"
+            ),
             parse_mode="Markdown",
             reply_markup=unban_request_keyboard(case.user_chat_id),
         )
@@ -829,6 +870,7 @@ def create_admin_router(
 
     @router.callback_query(F.data.startswith("rej:"))
     async def on_reject_reason(query: CallbackQuery) -> None:
+        """Применяет выбранную причину отклонения и закрывает кейс."""
         if not query.from_user or not query.data:
             return
         if query.message is None or query.message.chat.id != settings.admin_chat_id:
@@ -863,6 +905,7 @@ def create_admin_router(
         await query.answer("Отклонено.")
 
     async def flush_reply_media_group(group_key: tuple[int, str]) -> None:
+        """Обрабатывает ответ админа пользователю, если ответ пришел медиагруппой."""
         nonlocal pending_reply_case_id
         await asyncio.sleep(1.0)
         messages = sorted(
@@ -901,6 +944,7 @@ def create_admin_router(
 
     @router.message(F.chat.id == settings.admin_chat_id)
     async def on_admin_reply_message(message: Message) -> None:
+        """Ловит следующее сообщение модератора в режиме 'Ответить' и отправляет пользователю."""
         nonlocal pending_reply_case_id
         if not message.from_user or message.from_user.is_bot:
             return

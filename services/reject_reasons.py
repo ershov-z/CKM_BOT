@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Чтение причин отклонения из JSON-файла."""
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,11 +9,14 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class RejectReason:
+    """Одна причина отклонения: текст на кнопке и текст ответа пользователю."""
+
     button_name: str
     reply_text: str
 
 
 def load_reject_reasons(path: str | Path) -> list[RejectReason]:
+    """Загружает причины отклонения из файла и приводит их к единому формату."""
     reasons_path = Path(path)
     raw = json.loads(reasons_path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+"""Утилиты для безопасного копирования контента между чатами.
+
+Используем copy_message/copy_messages вместо forward,
+чтобы не светить автора исходного сообщения.
+"""
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, Message
 
 
 class MediaBridge:
+    """Мост между чатами: копируем одно или много сообщений."""
+
     async def copy_single(
         self,
         bot: Bot,
@@ -14,6 +22,7 @@ class MediaBridge:
         message_id: int,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Message:
+        """Копирует одно сообщение (с опциональной клавиатурой)."""
         return await bot.copy_message(
             chat_id=to_chat_id,
             from_chat_id=from_chat_id,
@@ -28,9 +37,11 @@ class MediaBridge:
         to_chat_id: int,
         message_ids: list[int],
     ) -> list[int]:
+        """Копирует список сообщений и возвращает их новые message_id в целевом чате."""
         if not message_ids:
             return []
         try:
+            # Быстрый путь: bulk API копирования.
             result = await bot.copy_messages(
                 chat_id=to_chat_id,
                 from_chat_id=from_chat_id,
@@ -38,6 +49,7 @@ class MediaBridge:
             )
             return [msg_id.message_id for msg_id in result]
         except TelegramBadRequest:
+            # Надежный fallback: копируем по одному, если bulk не сработал.
             copied_ids: list[int] = []
             for msg_id in message_ids:
                 message = await bot.copy_message(

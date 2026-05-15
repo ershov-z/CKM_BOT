@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Сервис автоматической генерации тегов через Chad AI (OpenAI-compatible API).
+
+Логика:
+1) отправляем текст поста в модель;
+2) просим вернуть строгий JSON с тегами и оценками;
+3) валидируем и нормализуем ответ;
+4) применяем внутренние эвристики проекта.
+"""
+
 import json
 import re
 from dataclasses import dataclass
@@ -7,6 +16,7 @@ from dataclasses import dataclass
 import aiohttp
 
 
+# Разрешенный каталог тегов, который знает и кнопочный интерфейс, и LLM-промпт.
 TAG_CATALOG: list[str] = [
     "#телеграф",
     "#тейк",
@@ -24,6 +34,7 @@ TAG_CATALOG: list[str] = [
     "#щитпост",
 ]
 
+# Человеческие объяснения тегов — они подставляются в prompt для повышения точности.
 TAG_DESCRIPTIONS: dict[str, str] = {
     "#телеграф": (
         "длинная аналитика или структурный разбор, обычно с ссылкой на Telegraph/Telegra.ph; "
@@ -77,11 +88,15 @@ TAG_DESCRIPTIONS: dict[str, str] = {
 
 @dataclass(slots=True)
 class TagScore:
+    """Оценка релевантности конкретного тега (0..10)."""
+
     tag: str
     score: float
 
 
 class TaggingService:
+    """Клиент Chad API + правила постобработки тегов."""
+
     def __init__(self, api_key: str, base_url: str, model: str) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -89,6 +104,7 @@ class TaggingService:
         self._catalog_map = {tag.lower(): tag for tag in TAG_CATALOG}
 
     def _extract_json(self, content: str) -> str:
+        """Извлекает JSON-часть из ответа модели (в т.ч. если она завернула в ```json блок)."""
         stripped = content.strip()
         if stripped.startswith("```"):
             stripped = re.sub(r"^```(?:json)?\s*", "", stripped, count=1)
@@ -96,6 +112,7 @@ class TaggingService:
         return stripped.strip()
 
     def _normalize_tag(self, raw: str) -> str | None:
+        """Приводит тег к каноническому виду из каталога (или возвращает None)."""
         candidate = raw.strip().lower()
         if not candidate.startswith("#"):
             candidate = f"#{candidate.lstrip('#')}"
@@ -106,6 +123,10 @@ class TaggingService:
         scored: list[TagScore],
         content_text: str,
     ) -> list[TagScore]:
+        """Применяет бизнес-эвристики проекта к оценкам модели.
+
+        Нужны, чтобы улучшить качество на спорных случаях (например, #тейк vs #дропбазы).
+        """
         score_map: dict[str, float] = {item.tag.lower(): item.score for item in scored}
 
         text = content_text.lower()
@@ -128,12 +149,12 @@ class TaggingService:
         ]
         marker_hits = sum(1 for marker in argument_markers if marker in text)
 
-        # Boost #дропбазы for long structured argumentative takes
+        # Усиливаем #дропбазы для длинных структурных разборов с аргументацией.
         if word_count >= 180 and paragraph_count >= 4 and marker_hits >= 3:
             current = score_map.get("#дропбазы", 0.0)
             score_map["#дропбазы"] = max(current, 8.6)
 
-        # If post is clearly short/opinion-only, keep #тейк competitive.
+        # Для коротких opinion-постов поддерживаем конкурентный вес #тейк.
         if word_count <= 140 and marker_hits <= 1:
             current_take = score_map.get("#тейк", 0.0)
             score_map["#тейк"] = max(current_take, 7.8)
@@ -143,6 +164,7 @@ class TaggingService:
         return merged
 
     def _parse_scores(self, content: str) -> list[TagScore]:
+        """Разбирает JSON-ответ модели и оставляет валидные теги с оценками."""
         payload = json.loads(self._extract_json(content))
         entries = payload.get("tags") if isinstance(payload, dict) else payload
         if not isinstance(entries, list):
@@ -176,6 +198,7 @@ class TaggingService:
         return ranked
 
     async def score_tags(self, content_text: str) -> list[TagScore]:
+        """Основной вызов модели: возвращает список тегов с оценками."""
         tag_guide_lines = [
             f"{tag} - {TAG_DESCRIPTIONS[tag]}"
             for tag in TAG_CATALOG
@@ -219,6 +242,7 @@ class TaggingService:
             "max_completion_tokens": 100000,
         }
 
+        # Таймаут, чтобы не зависать бесконечно при сетевых проблемах.
         timeout = aiohttp.ClientTimeout(total=45)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=body) as response:
@@ -238,5 +262,6 @@ class TaggingService:
         return self._apply_heuristics(parsed, content_text)
 
     async def generate_top_tags(self, content_text: str, min_score: float = 7.0) -> list[str]:
+        """Упрощенный режим: вернуть только теги, прошедшие порог минимального score."""
         scored = await self.score_tags(content_text)
         return [item.tag for item in scored if item.score > min_score]

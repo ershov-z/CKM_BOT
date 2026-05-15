@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""Точка входа приложения.
+
+Здесь мы:
+- создаем все сервисы;
+- подключаем роутеры с обработчиками;
+- запускаем long polling Telegram-бота.
+"""
+
 import asyncio
 import logging
 from pathlib import Path
@@ -16,13 +24,18 @@ from services.tagging_service import TaggingService
 
 
 async def run() -> None:
+    """Собирает зависимости и запускает цикл обработки обновлений."""
+    # Абсолютные пути, чтобы приложение работало одинаково локально и на хостинге.
     base_dir = Path(__file__).resolve().parent
     data_dir = base_dir / "data"
 
+    # Читаем настройки из окружения.
     settings = load_settings()
+    # Создаем объект Telegram-бота и диспетчер роутеров.
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
 
+    # Внутренние сервисы приложения.
     case_store = CaseStore()
     media_bridge = MediaBridge()
     ban_store = BanStore(data_dir / "bans.json")
@@ -32,7 +45,9 @@ async def run() -> None:
         model=settings.chad_model,
     )
 
+    # Роутер входящих сообщений пользователей.
     dp.include_router(create_user_router(settings, case_store, media_bridge, ban_store))
+    # Роутер действий админов (модерация, публикация, баны, теги).
     dp.include_router(
         create_admin_router(
             settings=settings,
@@ -44,10 +59,12 @@ async def run() -> None:
         )
     )
 
+    # Стартуем polling: бот регулярно опрашивает Telegram на новые апдейты.
     await dp.start_polling(bot)
 
 
 def main() -> None:
+    """Синхронная обертка для запуска async-кода."""
     logging.basicConfig(level=logging.INFO)
     asyncio.run(run())
 
