@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -43,7 +44,8 @@ def _parse_admin_ids(raw: str) -> set[int]:
 
 
 def load_settings() -> Settings:
-    load_dotenv()
+    project_env = Path(__file__).resolve().parent / ".env"
+    load_dotenv(dotenv_path=project_env if project_env.exists() else None)
 
     return Settings(
         bot_token=_require("BOT_TOKEN"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 
@@ -15,13 +16,16 @@ from services.tagging_service import TaggingService
 
 
 async def run() -> None:
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
+
     settings = load_settings()
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
 
     case_store = CaseStore()
     media_bridge = MediaBridge()
-    ban_store = BanStore("data/bans.json")
+    ban_store = BanStore(data_dir / "bans.json")
     tagging_service = TaggingService(
         api_key=settings.chad_api_key,
         base_url=settings.chad_base_url,
@@ -36,7 +40,7 @@ async def run() -> None:
             media_bridge=media_bridge,
             ban_store=ban_store,
             tagging_service=tagging_service,
-            reasons_path="data/reject_reasons.json",
+            reasons_path=str(data_dir / "reject_reasons.json"),
         )
     )
 
