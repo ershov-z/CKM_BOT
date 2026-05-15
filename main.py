@@ -40,7 +40,7 @@ async def run() -> None:
             media_bridge=media_bridge,
             ban_store=ban_store,
             tagging_service=tagging_service,
-            reasons_path=str(data_dir / "reject_reasons.json"),
+            reasons_path=str(base_dir / "reject_reasons.json"),
         )
     )
 
