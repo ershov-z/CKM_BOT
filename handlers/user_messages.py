@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+import time
+from uuid import uuid4
+
+from aiogram import F, Router
+from aiogram.enums import ChatType
+from aiogram.types import Message
+
+from config import Settings
+from handlers.ui import moderation_keyboard
+from services.ban_store import BanStore
+from services.case_store import CaseRecord, CaseStore
+from services.media_bridge import MediaBridge
+
+
+def create_user_router(
+    settings: Settings,
+    case_store: CaseStore,
+    media_bridge: MediaBridge,
+    ban_store: BanStore,
+) -> Router:
+    router = Router(name="user_messages")
+    media_group_buffer: dict[tuple[int, str], list[Message]] = {}
+    media_group_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
+    pending_user_messages: dict[int, list[Message]] = {}
+    pending_user_tasks: dict[int, asyncio.Task[None]] = {}
+    case_send_lock = asyncio.Lock()
+    next_case_send_at = 0.0
+    batch_window_seconds = 5.0
+
+    def build_reply_context_text(message: Message) -> str:
+        replied = message.reply_to_message
+        if not replied:
+            return "Выберите действия с анонимкой"
+
+        preview = replied.text or replied.caption
+        if not preview:
+            if replied.photo:
+                preview = "[фото]"
+            elif replied.video:
+                preview = "[видео]"
+            elif replied.voice:
+                preview = "[голосовое]"
+            elif replied.document:
+                preview = "[документ]"
+            elif replied.sticker:
+                preview = "[стикер]"
+            else:
+                preview = "[медиа/служебное сообщение]"
+
+        preview = preview.strip().replace("\n", " ")
+        if len(preview) > 120:
+            preview = f"{preview[:117]}..."
+        return f"Выберите действия с анонимкой\n\nПользователь ответил на: {preview}"
+
+    def build_tagging_content(messages: list[Message]) -> str:
+        chunks: list[str] = []
+        for message in messages:
+            text = (message.text or message.caption or "").strip()
+            if text:
+                chunks.append(text)
+                continue
+            if message.photo:
+                chunks.append("[фото]")
+            elif message.video:
+                chunks.append("[видео]")
+            elif message.voice:
+                chunks.append("[голосовое]")
+            elif message.document:
+                file_name = message.document.file_name or "документ"
+                chunks.append(f"[документ: {file_name}]")
+            elif message.sticker:
+                chunks.append("[стикер]")
+            else:
+                chunks.append("[медиа/служебное сообщение]")
+        return "\n".join(chunks).strip()
+
+    async def submit_case(messages: list[Message]) -> None:
+        nonlocal next_case_send_at
+        first = messages[0]
+        case_id = uuid4().hex[:8]
+        source_message_ids = [msg.message_id for msg in messages]
+        keyboard = moderation_keyboard(case_id)
+        control_text = build_reply_context_text(first)
+        tagging_content = build_tagging_content(messages)
+        single_content_text = (first.text or first.caption or "").strip()
+        single_content_entities = list(first.entities or first.caption_entities or [])
+        single_content_type = first.content_type
+
+        async with case_send_lock:
+            now = time.monotonic()
+            if now < next_case_send_at:
+                await asyncio.sleep(next_case_send_at - now)
+
+            if len(source_message_ids) == 1:
+                copied = await media_bridge.copy_single(
+                    bot=first.bot,
+                    from_chat_id=first.chat.id,
+                    to_chat_id=settings.admin_chat_id,
+                    message_id=first.message_id,
+                )
+                control = await first.bot.send_message(
+                    chat_id=settings.admin_chat_id,
+                    text=control_text,
+                    reply_markup=keyboard,
+                )
+                case_store.add_case(
+                    CaseRecord(
+                        case_id=case_id,
+                        user_chat_id=first.chat.id,
+                        source_message_ids=source_message_ids,
+                        is_media_group=False,
+                        admin_message_ids=[copied.message_id, control.message_id],
+                        control_message_id=control.message_id,
+                        content_for_tagging=tagging_content,
+                        single_content_text=single_content_text,
+                        single_content_entities=single_content_entities,
+                        single_content_type=single_content_type,
+                    )
+                )
+            else:
+                posts_count = len(source_message_ids)
+                start_marker = await first.bot.send_message(
+                    chat_id=settings.admin_chat_id,
+                    text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+                )
+                copied_ids = await media_bridge.copy_many(
+                    bot=first.bot,
+                    from_chat_id=first.chat.id,
+                    to_chat_id=settings.admin_chat_id,
+                    message_ids=source_message_ids,
+                )
+                end_marker = await first.bot.send_message(
+                    chat_id=settings.admin_chat_id,
+                    text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+                )
+                control = await first.bot.send_message(
+                    chat_id=settings.admin_chat_id,
+                    text=control_text,
+                    reply_markup=keyboard,
+                )
+                case_store.add_case(
+                    CaseRecord(
+                        case_id=case_id,
+                        user_chat_id=first.chat.id,
+                        source_message_ids=source_message_ids,
+                        is_media_group=True,
+                        admin_message_ids=[
+                            start_marker.message_id,
+                            *copied_ids,
+                            end_marker.message_id,
+                            control.message_id,
+                        ],
+                        control_message_id=control.message_id,
+                        content_for_tagging=tagging_content,
+                        single_content_text=single_content_text,
+                        single_content_entities=single_content_entities,
+                        single_content_type=single_content_type,
+                    )
+                )
+
+            await first.bot.send_message(
+                chat_id=first.chat.id,
+                text="Ваша анонимка принята!",
+            )
+
+            # Limit intake to one moderation case every 5 seconds.
+            next_case_send_at = time.monotonic() + 5.0
+
+    async def flush_user_batch(user_chat_id: int) -> None:
+        try:
+            await asyncio.sleep(batch_window_seconds)
+        except asyncio.CancelledError:
+            return
+        messages = sorted(
+            pending_user_messages.pop(user_chat_id, []),
+            key=lambda item: item.message_id,
+        )
+        pending_user_tasks.pop(user_chat_id, None)
+        if messages:
+            await submit_case(messages)
+
+    async def enqueue_user_messages(messages: list[Message]) -> None:
+        if not messages:
+            return
+        user_chat_id = messages[0].chat.id
+        pending_user_messages.setdefault(user_chat_id, []).extend(messages)
+        task = pending_user_tasks.get(user_chat_id)
+        if task and not task.done():
+            task.cancel()
+        pending_user_tasks[user_chat_id] = asyncio.create_task(
+            flush_user_batch(user_chat_id)
+        )
+
+    async def flush_media_group(group_key: tuple[int, str]) -> None:
+        await asyncio.sleep(1.0)
+        messages = sorted(
+            media_group_buffer.pop(group_key, []),
+            key=lambda item: item.message_id,
+        )
+        media_group_tasks.pop(group_key, None)
+        if messages:
+            await enqueue_user_messages(messages)
+
+    @router.message(F.chat.type == ChatType.PRIVATE)
+    async def on_user_message(message: Message) -> None:
+        if not message.from_user or message.from_user.is_bot:
+            return
+        if ban_store.is_banned(message.from_user.id):
+            ban_until = ban_store.get_ban_until(message.from_user.id)
+            if ban_until is None:
+                text = "Вы забанены и не можете отправлять сообщения этому боту."
+            else:
+                until_text = datetime.fromtimestamp(ban_until).strftime("%d.%m.%Y %H:%M")
+                text = f"Вы временно забанены до {until_text} и не можете писать боту."
+            await message.answer(text)
+            return
+        if message.media_group_id:
+            key = (message.chat.id, message.media_group_id)
+            media_group_buffer.setdefault(key, []).append(message)
+            if key not in media_group_tasks:
+                media_group_tasks[key] = asyncio.create_task(
+                    flush_media_group(key)
+                )
+            return
+        await enqueue_user_messages([message])
+
+    return router
