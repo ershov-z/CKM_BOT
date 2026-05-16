@@ -456,6 +456,31 @@ def create_admin_router(
             )
         await query.answer("Теги обновлены.")
 
+    @router.callback_query(F.data.startswith("tag_back:"))
+    async def on_tag_back(query: CallbackQuery) -> None:
+        """Возвращает из предпросмотра тегов к стартовой клавиатуре кейса."""
+        if not query.from_user or not query.data:
+            return
+        if query.message is None or query.message.chat.id != settings.admin_chat_id:
+            await query.answer("Действие доступно только в админ-конфе.", show_alert=True)
+            return
+        if not is_allowed_moderator(query.from_user.id):
+            await query.answer("У вас нет прав на модерацию.", show_alert=True)
+            return
+
+        _, case_id = query.data.split(":", maxsplit=1)
+        case = case_store.get_case(case_id)
+        if not case or case.status != "open":
+            await query.answer("Кейс уже обработан или не найден.", show_alert=True)
+            return
+        if case.control_message_id is not None:
+            await query.bot.edit_message_reply_markup(
+                chat_id=settings.admin_chat_id,
+                message_id=case.control_message_id,
+                reply_markup=moderation_keyboard(case.case_id),
+            )
+        await query.answer("Возврат к действиям кейса.")
+
     @router.callback_query(F.data.startswith("pub_cancel:"))
     async def on_publish_cancel(query: CallbackQuery) -> None:
         if not query.from_user or not query.data:
@@ -478,7 +503,7 @@ def create_admin_router(
                 message_id=case.control_message_id,
                 reply_markup=moderation_keyboard(case.case_id),
             )
-        await query.answer("Публикация отменена.")
+        await query.answer("Возврат к действиям кейса.")
 
     @router.callback_query(F.data.startswith("pub_done:"))
     async def on_publish_done(query: CallbackQuery) -> None:
@@ -875,7 +900,7 @@ def create_admin_router(
             message_id=query.message.message_id,
             reply_markup=unban_request_keyboard(user_id),
         )
-        await query.answer("Разбан отменен.")
+        await query.answer("Возврат к предыдущим кнопкам.")
 
     @router.callback_query(F.data.startswith("unban_ok:"))
     async def on_unban_confirm(query: CallbackQuery) -> None:
@@ -958,6 +983,31 @@ def create_admin_router(
         )
         await finalize_case(query.bot, case, "rejected", "отклонён.")
         await query.answer("Отклонено.")
+
+    @router.callback_query(F.data.startswith("rej_back:"))
+    async def on_reject_back(query: CallbackQuery) -> None:
+        """Возвращает из выбора причины отклонения к стартовым действиям кейса."""
+        if not query.from_user or not query.data:
+            return
+        if query.message is None or query.message.chat.id != settings.admin_chat_id:
+            await query.answer("Действие доступно только в админ-конфе.", show_alert=True)
+            return
+        if not is_allowed_moderator(query.from_user.id):
+            await query.answer("У вас нет прав на модерацию.", show_alert=True)
+            return
+
+        _, case_id = query.data.split(":", maxsplit=1)
+        case = case_store.get_case(case_id)
+        if not case or case.status != "open":
+            await query.answer("Кейс уже обработан или не найден.", show_alert=True)
+            return
+        if case.control_message_id is not None:
+            await query.bot.edit_message_reply_markup(
+                chat_id=settings.admin_chat_id,
+                message_id=case.control_message_id,
+                reply_markup=moderation_keyboard(case.case_id),
+            )
+        await query.answer("Возврат к действиям кейса.")
 
     async def flush_reply_media_group(group_key: tuple[int, str]) -> None:
         """Обрабатывает ответ админа пользователю, если ответ пришел медиагруппой."""

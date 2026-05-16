@@ -54,6 +54,14 @@ def reject_reasons_keyboard(
                 )
             ]
         )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"rej_back:{case_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -70,7 +78,13 @@ def tagged_preview_keyboard(case_id: str) -> InlineKeyboardMarkup:
                     text="Редактировать теги",
                     callback_data=f"tag_edit:{case_id}",
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"tag_back:{case_id}",
+                )
+            ],
         ]
     )
 
@@ -83,6 +97,7 @@ def manual_publish_tags_keyboard(
     done_callback: str = "pub_done",
     cancel_callback: str = "pub_cancel",
     done_text: str = "Опубликовать",
+    cancel_text: str = "Назад",
 ) -> InlineKeyboardMarkup:
     """Универсальная клавиатура мультивыбора тегов.
 
@@ -109,7 +124,7 @@ def manual_publish_tags_keyboard(
                 callback_data=f"{done_callback}:{case_id}",
             ),
             InlineKeyboardButton(
-                text="Отмена",
+                text=cancel_text,
                 callback_data=f"{cancel_callback}:{case_id}",
             ),
         ]
@@ -143,7 +158,7 @@ def ban_duration_keyboard(case_id: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Отмена",
+                    text="Назад",
                     callback_data=f"ban_cancel:{case_id}",
                 )
             ],
@@ -197,7 +212,7 @@ def unban_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Отмена",
+                    text="Назад",
                     callback_data=f"unban_cancel:{user_id}",
                 )
             ],
