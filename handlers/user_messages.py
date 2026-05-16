@@ -114,6 +114,8 @@ def create_user_router(
                 await asyncio.sleep(next_case_send_at - now)
 
             # Одиночный кейс.
+            # В админ-чат копируем только контент, а не "пересланное сообщение":
+            # это скрывает автора на стороне модерации.
             if len(source_message_ids) == 1:
                 copied = await media_bridge.copy_single(
                     bot=first.bot,
@@ -129,6 +131,8 @@ def create_user_router(
                 case_store.add_case(
                     CaseRecord(
                         case_id=case_id,
+                        # chat_id держим только в памяти процесса.
+                        # На диск он не сериализуется (см. CaseStore._serialize_case).
                         user_chat_id=first.chat.id,
                         source_message_ids=source_message_ids,
                         is_media_group=False,
@@ -144,6 +148,8 @@ def create_user_router(
                     )
                 )
             # Кейс из нескольких сообщений.
+            # Маркеры "начало/конец" нужны лишь для удобства чтения модераторами
+            # и не несут персональных данных пользователя.
             else:
                 posts_count = len(source_message_ids)
                 start_marker = await first.bot.send_message(
@@ -168,6 +174,8 @@ def create_user_router(
                 case_store.add_case(
                     CaseRecord(
                         case_id=case_id,
+                        # chat_id держим только в памяти процесса.
+                        # На диск он не сериализуется (см. CaseStore._serialize_case).
                         user_chat_id=first.chat.id,
                         source_message_ids=source_message_ids,
                         is_media_group=True,

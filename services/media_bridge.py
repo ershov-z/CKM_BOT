@@ -22,7 +22,12 @@ class MediaBridge:
         message_id: int,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Message:
-        """Копирует одно сообщение (с опциональной клавиатурой)."""
+        """Копирует одно сообщение (с опциональной клавиатурой).
+
+        Важный аспект анонимности: copy_message отправляет контент "как от бота"
+        без ссылки на исходного автора. Поэтому в админ-чат и канал не утекает
+        ни профиль пользователя, ни профиль модератора.
+        """
         return await bot.copy_message(
             chat_id=to_chat_id,
             from_chat_id=from_chat_id,
@@ -37,7 +42,11 @@ class MediaBridge:
         to_chat_id: int,
         message_ids: list[int],
     ) -> list[int]:
-        """Копирует список сообщений и возвращает их новые message_id в целевом чате."""
+        """Копирует список сообщений и возвращает их новые message_id в целевом чате.
+
+        Здесь тот же принцип анонимности, что и в copy_single: используем copy API,
+        а не forward API, чтобы Telegram не показывал карточку исходного отправителя.
+        """
         if not message_ids:
             return []
         try:

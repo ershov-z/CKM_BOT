@@ -199,6 +199,8 @@ class TaggingService:
 
     async def score_tags(self, content_text: str) -> list[TagScore]:
         """Основной вызов модели: возвращает список тегов с оценками."""
+        # В LLM отправляем только контент кейса (текст/описание медиа) без user_chat_id,
+        # user_id и других идентификаторов автора. Это сохраняет анонимность источника.
         tag_guide_lines = [
             f"{tag} - {TAG_DESCRIPTIONS[tag]}"
             for tag in TAG_CATALOG

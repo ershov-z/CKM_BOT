@@ -12,6 +12,8 @@ from services.reject_reasons import RejectReason
 
 def moderation_keyboard(case_id: str) -> InlineKeyboardMarkup:
     """Главная клавиатура кейса в админ-чате."""
+    # В callback_data кладём только short case_id, а не user_id/chat_id:
+    # кнопки нельзя использовать для deanonymization автора.
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [

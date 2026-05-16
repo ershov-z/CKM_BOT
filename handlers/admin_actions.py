@@ -169,6 +169,8 @@ def create_admin_router(
         """Финальная публикация кейса в канал (с учетом типа контента)."""
         # Основной путь: публикация из лички пользователя (когда chat_id еще в памяти).
         # Fallback после рестарта: публикация из копий в админ-чате.
+        # За счет fallback админ может завершить публикацию даже после падения бота,
+        # при этом без восстановления прямой связи с пользователем.
         source_chat_id = case.user_chat_id or settings.admin_chat_id
         source_message_ids = (
             case.source_message_ids
@@ -264,6 +266,8 @@ def create_admin_router(
     ) -> None:
         """Закрывает кейс: снимает кнопки, меняет статус и пишет сервисную отметку."""
         await disable_case_controls(bot, case)
+        # Статус пишем в CaseStore, чтобы кейс исчез из open_cases.json и не лежал там
+        # дольше необходимого для модерации времени.
         case_store.mark_done(case.case_id, status)
         if send_case_note:
             await bot.send_message(
@@ -367,6 +371,8 @@ def create_admin_router(
         if action == "reply":
             if case.user_chat_id is None:
                 # После рестарта reply нельзя выполнить без chat_id автора.
+                # Это осознанный privacy trade-off: без persistent chat_id мы
+                # жертвуем reply/ban/reject, но сохраняем publish.
                 await query.answer(
                     "После рестарта доступна только публикация: chat_id автора не восстановлен.",
                     show_alert=True,
@@ -385,6 +391,7 @@ def create_admin_router(
         if action == "ban":
             if case.user_chat_id is None:
                 # Бан технически невозможен без chat_id в живой памяти процесса.
+                # Аналогично reply: не восстанавливаем user-id из диска намеренно.
                 await query.answer(
                     "После рестарта доступна только публикация: chat_id автора не восстановлен.",
                     show_alert=True,

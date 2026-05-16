@@ -66,6 +66,8 @@ def _parse_admin_ids(raw: str) -> set[int]:
 def load_settings() -> Settings:
     """Загружает .env из корня проекта и возвращает валидированный объект Settings."""
     # Используем абсолютный путь к .env, чтобы запуск не зависел от текущей рабочей директории.
+    # В конфиге нет хранилища пользовательских сообщений/идентификаторов:
+    # здесь только техпараметры запуска и доступов.
     project_env = Path(__file__).resolve().parent / ".env"
     load_dotenv(dotenv_path=project_env if project_env.exists() else None)
 

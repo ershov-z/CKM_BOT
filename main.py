@@ -44,6 +44,9 @@ async def run() -> None:
     dp = Dispatcher()
 
     # Внутренние сервисы приложения.
+    # CaseStore хранит открытые кейсы на диске, но без user chat_id:
+    # это позволяет восстанавливать публикацию после рестарта и не держать
+    # прямую привязку "кейс -> пользователь" в постоянном хранилище.
     case_store = CaseStore(data_dir / "open_cases.json")
     media_bridge = MediaBridge()
     ban_store = BanStore(data_dir / "bans.json")

@@ -110,6 +110,8 @@ class CaseStore:
             return None
 
     def _load_cases(self) -> None:
+        # Загружаем только "рабочее" состояние публикации. Даже если файл будет
+        # скомпрометирован, в нём нет user_chat_id для большинства кейсов.
         if not self._storage_path:
             return
         if not self._storage_path.exists():
@@ -130,6 +132,8 @@ class CaseStore:
                 self._cases[case.case_id] = case
 
     def _save_cases(self) -> None:
+        # Персистим только открытые кейсы: закрытые (published/rejected/...) удаляются
+        # из JSON, чтобы не накапливать историю и не увеличивать риски deanonymization.
         if not self._storage_path:
             return
         data = {

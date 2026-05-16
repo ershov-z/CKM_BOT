@@ -17,6 +17,7 @@ class RejectReason:
 
 def load_reject_reasons(path: str | Path) -> list[RejectReason]:
     """Загружает причины отклонения из файла и приводит их к единому формату."""
+    # Файл содержит только тексты кнопок/ответов и не хранит пользовательские данные.
     reasons_path = Path(path)
     raw = json.loads(reasons_path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
