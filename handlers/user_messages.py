@@ -24,6 +24,8 @@ from services.ban_store import BanStore
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
 
+CAPTION_LIMIT = 1024
+
 
 def create_user_router(
     settings: Settings,
@@ -117,36 +119,91 @@ def create_user_router(
             # В админ-чат копируем только контент, а не "пересланное сообщение":
             # это скрывает автора на стороне модерации.
             if len(source_message_ids) == 1:
-                copied = await media_bridge.copy_single(
-                    bot=first.bot,
-                    from_chat_id=first.chat.id,
-                    to_chat_id=settings.admin_chat_id,
-                    message_id=first.message_id,
-                )
-                control = await first.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=control_text,
-                    reply_markup=keyboard,
-                )
-                case_store.add_case(
-                    CaseRecord(
-                        case_id=case_id,
-                        # chat_id держим только в памяти процесса.
-                        # На диск он не сериализуется (см. CaseStore._serialize_case).
-                        user_chat_id=first.chat.id,
-                        source_message_ids=source_message_ids,
-                        is_media_group=False,
-                        admin_message_ids=[copied.message_id, control.message_id],
-                        # Нужен fallback-путь публикации после рестарта без user chat_id:
-                        # этот ID указывает на контентное сообщение в админ-чате.
-                        admin_content_message_ids=[copied.message_id],
-                        control_message_id=control.message_id,
-                        content_for_tagging=tagging_content,
-                        single_content_text=single_content_text,
-                        single_content_entities=single_content_entities,
-                        single_content_type=single_content_type,
+                if single_content_type != "text" and len(single_content_text) > CAPTION_LIMIT:
+                    # Premium-кейс: caption длиннее лимита Bot API.
+                    # Показываем админам такой кейс как "мультипост":
+                    # медиа без подписи + текст отдельным сообщением.
+                    posts_count = 2
+                    start_marker = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
                     )
-                )
+                    copied = await media_bridge.copy_single(
+                        bot=first.bot,
+                        from_chat_id=first.chat.id,
+                        to_chat_id=settings.admin_chat_id,
+                        message_id=first.message_id,
+                        caption="",
+                    )
+                    text_message = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=single_content_text,
+                        entities=single_content_entities or None,
+                    )
+                    end_marker = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+                    )
+                    control = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=control_text,
+                        reply_markup=keyboard,
+                    )
+                    case_store.add_case(
+                        CaseRecord(
+                            case_id=case_id,
+                            # chat_id держим только в памяти процесса.
+                            # На диск он не сериализуется (см. CaseStore._serialize_case).
+                            user_chat_id=first.chat.id,
+                            source_message_ids=source_message_ids,
+                            is_media_group=False,
+                            admin_message_ids=[
+                                start_marker.message_id,
+                                copied.message_id,
+                                text_message.message_id,
+                                end_marker.message_id,
+                                control.message_id,
+                            ],
+                            # Контентные сообщения для fallback-публикации после рестарта.
+                            admin_content_message_ids=[copied.message_id, text_message.message_id],
+                            control_message_id=control.message_id,
+                            content_for_tagging=tagging_content,
+                            single_content_text=single_content_text,
+                            single_content_entities=single_content_entities,
+                            single_content_type=single_content_type,
+                        )
+                    )
+                else:
+                    copied = await media_bridge.copy_single(
+                        bot=first.bot,
+                        from_chat_id=first.chat.id,
+                        to_chat_id=settings.admin_chat_id,
+                        message_id=first.message_id,
+                    )
+                    control = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=control_text,
+                        reply_markup=keyboard,
+                    )
+                    case_store.add_case(
+                        CaseRecord(
+                            case_id=case_id,
+                            # chat_id держим только в памяти процесса.
+                            # На диск он не сериализуется (см. CaseStore._serialize_case).
+                            user_chat_id=first.chat.id,
+                            source_message_ids=source_message_ids,
+                            is_media_group=False,
+                            admin_message_ids=[copied.message_id, control.message_id],
+                            # Нужен fallback-путь публикации после рестарта без user chat_id:
+                            # этот ID указывает на контентное сообщение в админ-чате.
+                            admin_content_message_ids=[copied.message_id],
+                            control_message_id=control.message_id,
+                            content_for_tagging=tagging_content,
+                            single_content_text=single_content_text,
+                            single_content_entities=single_content_entities,
+                            single_content_type=single_content_type,
+                        )
+                    )
             # Кейс из нескольких сообщений.
             # Маркеры "начало/конец" нужны лишь для удобства чтения модераторами
             # и не несут персональных данных пользователя.

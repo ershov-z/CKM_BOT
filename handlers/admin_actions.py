@@ -36,6 +36,8 @@ from services.media_bridge import MediaBridge
 from services.reject_reasons import load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
+CAPTION_LIMIT = 1024
+
 
 def create_admin_router(
     settings: Settings,
@@ -203,6 +205,8 @@ def create_admin_router(
             )
             return
 
+        base_text = (case.single_content_text or "").strip()
+        tags = tags_block(case)
         composed = compose_single_text_with_tags(case)
         entities: list[MessageEntity] | None = (
             case.single_content_entities if case.single_content_entities else None
@@ -215,15 +219,69 @@ def create_admin_router(
             )
             return
 
+        async def send_single_media_multi_block(
+            text_message: str,
+            include_tags_as_separate_message: bool,
+            media_caption: str | None = None,
+            media_caption_entities: list[MessageEntity] | None = None,
+        ) -> None:
+            posts_count = 1
+            if text_message:
+                posts_count += 1
+            if include_tags_as_separate_message and tags:
+                posts_count += 1
+            await bot.send_message(
+                chat_id=settings.publish_channel_id,
+                text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+            )
+            await bot.copy_message(
+                chat_id=settings.publish_channel_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_ids[0],
+                caption=media_caption,
+                caption_entities=media_caption_entities,
+            )
+            if text_message:
+                await bot.send_message(
+                    chat_id=settings.publish_channel_id,
+                    text=text_message,
+                    entities=entities if text_message == base_text else None,
+                )
+            if include_tags_as_separate_message and tags:
+                await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+            await bot.send_message(
+                chat_id=settings.publish_channel_id,
+                text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+            )
+
         if media_requires_separate_tags(case):
             await bot.copy_message(
                 chat_id=settings.publish_channel_id,
                 from_chat_id=source_chat_id,
                 message_id=source_message_ids[0],
             )
-            tags = tags_block(case)
             if tags:
                 await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+            return
+
+        # Premium-кейс: длинная подпись у медиа не помещается в caption.
+        # Тогда публикуем как "мультипост": медиа + текст отдельным сообщением.
+        if len(base_text) > CAPTION_LIMIT:
+            await send_single_media_multi_block(
+                text_message=base_text,
+                include_tags_as_separate_message=bool(tags),
+            )
+            return
+
+        # Если исходная подпись помещалась, но после добавления тегов стала слишком длинной,
+        # оставляем в caption исходный текст, а теги публикуем отдельным сообщением в том же блоке.
+        if len(composed) > CAPTION_LIMIT:
+            await send_single_media_multi_block(
+                text_message="",
+                include_tags_as_separate_message=bool(tags),
+                media_caption=base_text or None,
+                media_caption_entities=entities,
+            )
             return
 
         await bot.copy_message(

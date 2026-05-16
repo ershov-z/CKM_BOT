@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.types import InlineKeyboardMarkup, Message, MessageEntity
 
 
 class MediaBridge:
@@ -21,6 +21,8 @@ class MediaBridge:
         to_chat_id: int,
         message_id: int,
         reply_markup: InlineKeyboardMarkup | None = None,
+        caption: str | None = None,
+        caption_entities: list[MessageEntity] | None = None,
     ) -> Message:
         """Копирует одно сообщение (с опциональной клавиатурой).
 
@@ -33,6 +35,8 @@ class MediaBridge:
             from_chat_id=from_chat_id,
             message_id=message_id,
             reply_markup=reply_markup,
+            caption=caption,
+            caption_entities=caption_entities,
         )
 
     async def copy_many(
