@@ -30,6 +30,7 @@ def create_user_router(
     case_store: CaseStore,
     media_bridge: MediaBridge,
     ban_store: BanStore,
+    start_message: str,
 ) -> Router:
     """Создает роутер пользовательских входящих сообщений."""
     router = Router(name="user_messages")
@@ -132,6 +133,9 @@ def create_user_router(
                         source_message_ids=source_message_ids,
                         is_media_group=False,
                         admin_message_ids=[copied.message_id, control.message_id],
+                        # Нужен fallback-путь публикации после рестарта без user chat_id:
+                        # этот ID указывает на контентное сообщение в админ-чате.
+                        admin_content_message_ids=[copied.message_id],
                         control_message_id=control.message_id,
                         content_for_tagging=tagging_content,
                         single_content_text=single_content_text,
@@ -173,6 +177,8 @@ def create_user_router(
                             end_marker.message_id,
                             control.message_id,
                         ],
+                        # В мультикейсе берём только контентные сообщения, без маркеров.
+                        admin_content_message_ids=[*copied_ids],
                         control_message_id=control.message_id,
                         content_for_tagging=tagging_content,
                         single_content_text=single_content_text,
@@ -232,6 +238,11 @@ def create_user_router(
     async def on_user_message(message: Message) -> None:
         """Главная точка входа для сообщений пользователя в личке."""
         if not message.from_user or message.from_user.is_bot:
+            return
+        # /start — это служебная команда знакомства с ботом, в модерацию не отправляем.
+        command_text = (message.text or "").strip().lower()
+        if command_text.startswith("/start"):
+            await message.answer(start_message)
             return
         # Если пользователь в бане — сразу показываем предупреждение и не принимаем кейс.
         if ban_store.is_banned(message.from_user.id):

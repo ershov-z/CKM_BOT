@@ -9,6 +9,7 @@ from __future__ import annotations
 """
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -31,12 +32,19 @@ async def run() -> None:
 
     # Читаем настройки из окружения.
     settings = load_settings()
+    # Загружаем пользовательские тексты (например, сообщение для /start).
+    user_messages_path = base_dir / "user_messages.json"
+    start_message = "Добро пожаловать!"
+    if user_messages_path.exists():
+        raw = json.loads(user_messages_path.read_text(encoding="utf-8"))
+        start_message = str(raw.get("start_message", start_message)).strip()
+
     # Создаем объект Telegram-бота и диспетчер роутеров.
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
 
     # Внутренние сервисы приложения.
-    case_store = CaseStore()
+    case_store = CaseStore(data_dir / "open_cases.json")
     media_bridge = MediaBridge()
     ban_store = BanStore(data_dir / "bans.json")
     tagging_service = TaggingService(
@@ -46,7 +54,15 @@ async def run() -> None:
     )
 
     # Роутер входящих сообщений пользователей.
-    dp.include_router(create_user_router(settings, case_store, media_bridge, ban_store))
+    dp.include_router(
+        create_user_router(
+            settings=settings,
+            case_store=case_store,
+            media_bridge=media_bridge,
+            ban_store=ban_store,
+            start_message=start_message,
+        )
+    )
     # Роутер действий админов (модерация, публикация, баны, теги).
     dp.include_router(
         create_admin_router(

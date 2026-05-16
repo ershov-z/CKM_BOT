@@ -5,7 +5,9 @@ from __future__ import annotations
 Кейс = одна пользовательская анонимка + служебные данные по её обработке.
 """
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from aiogram.types import MessageEntity
 
@@ -16,14 +18,16 @@ class CaseRecord:
 
     # Короткий ID кейса для кнопок и сервисных сообщений.
     case_id: str
-    # chat_id автора в личке с ботом (нужен для ответа, публикации, бана).
-    user_chat_id: int
+    # chat_id автора в личке с ботом (держим в памяти; может отсутствовать после рестарта).
+    user_chat_id: int | None
     # ID исходных сообщений пользователя (одно или несколько).
     source_message_ids: list[int]
     # True, если кейс собран из нескольких сообщений/альбома.
     is_media_group: bool
     # ID сообщений, отправленных ботом в админ-чат по этому кейсу.
     admin_message_ids: list[int] = field(default_factory=list)
+    # Только контентные сообщения кейса в админ-чате (без служебных маркеров/кнопок).
+    admin_content_message_ids: list[int] = field(default_factory=list)
     # ID основного служебного сообщения с кнопками.
     control_message_id: int | None = None
     # Текстовая “выжимка” для тегирования через LLM.
@@ -45,16 +49,104 @@ class CaseRecord:
 class CaseStore:
     """Операции с кейсами и краткоживущими режимами админов."""
 
-    def __init__(self) -> None:
+    def __init__(self, storage_path: str | Path | None = None) -> None:
+        self._storage_path = Path(storage_path) if storage_path else None
         self._cases: dict[str, CaseRecord] = {}
         # Хранит состояние “следующее сообщение админа = ответ пользователю”.
         self._pending_reply_by_admin: dict[int, str] = {}
         # Хранит состояние “админ сейчас редактирует теги кейса”.
         self._pending_tag_edit_by_admin: dict[int, str] = {}
+        self._load_cases()
+
+    def _serialize_case(self, case: CaseRecord) -> dict:
+        # Сохраняем только то, что нужно для восстановления публикации после рестарта.
+        # ВАЖНО: user_chat_id намеренно не пишем в JSON ради анонимности.
+        return {
+            "case_id": case.case_id,
+            "source_message_ids": case.source_message_ids,
+            "is_media_group": case.is_media_group,
+            "admin_message_ids": case.admin_message_ids,
+            "admin_content_message_ids": case.admin_content_message_ids,
+            "control_message_id": case.control_message_id,
+            "content_for_tagging": case.content_for_tagging,
+            "single_content_text": case.single_content_text,
+            "single_content_type": case.single_content_type,
+            "selected_tags": case.selected_tags,
+            "is_waiting_tag_edit": case.is_waiting_tag_edit,
+            "status": case.status,
+        }
+
+    def _deserialize_case(self, payload: dict) -> CaseRecord | None:
+        try:
+            return CaseRecord(
+                case_id=str(payload["case_id"]),
+                # После рестарта chat_id автора обычно недоступен (None).
+                # Это нормальный режим: publish работает, reply/ban/reject нет.
+                user_chat_id=(
+                    int(payload["user_chat_id"])
+                    if payload.get("user_chat_id") is not None
+                    else None
+                ),
+                source_message_ids=[int(item) for item in payload["source_message_ids"]],
+                is_media_group=bool(payload["is_media_group"]),
+                admin_message_ids=[int(item) for item in payload.get("admin_message_ids", [])],
+                admin_content_message_ids=[
+                    int(item) for item in payload.get("admin_content_message_ids", [])
+                ],
+                control_message_id=(
+                    int(payload["control_message_id"])
+                    if payload.get("control_message_id") is not None
+                    else None
+                ),
+                content_for_tagging=str(payload.get("content_for_tagging", "")),
+                single_content_text=str(payload.get("single_content_text", "")),
+                single_content_entities=[],
+                single_content_type=str(payload.get("single_content_type", "")),
+                selected_tags=[str(item) for item in payload.get("selected_tags", [])],
+                is_waiting_tag_edit=bool(payload.get("is_waiting_tag_edit", False)),
+                status=str(payload.get("status", "open")),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _load_cases(self) -> None:
+        if not self._storage_path:
+            return
+        if not self._storage_path.exists():
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+            self._storage_path.write_text("{}", encoding="utf-8")
+            return
+        try:
+            raw = json.loads(self._storage_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        for case_id, payload in raw.items():
+            if not isinstance(payload, dict):
+                continue
+            case = self._deserialize_case({"case_id": case_id, **payload})
+            if case:
+                self._cases[case.case_id] = case
+
+    def _save_cases(self) -> None:
+        if not self._storage_path:
+            return
+        data = {
+            case_id: self._serialize_case(case)
+            for case_id, case in self._cases.items()
+            if case.status == "open"
+        }
+        self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self._storage_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def add_case(self, case: CaseRecord) -> None:
         """Регистрирует новый кейс."""
         self._cases[case.case_id] = case
+        self._save_cases()
 
     def get_case(self, case_id: str) -> CaseRecord | None:
         """Возвращает кейс по ID или None."""
@@ -65,6 +157,7 @@ class CaseStore:
         case = self._cases.get(case_id)
         if case:
             case.status = status
+            self._save_cases()
 
     def is_open(self, case_id: str) -> bool:
         """Проверка, что кейс еще не закрыт."""

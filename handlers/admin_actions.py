@@ -167,6 +167,23 @@ def create_admin_router(
 
     async def publish_case_with_tags(bot: Bot, case: CaseRecord) -> None:
         """Финальная публикация кейса в канал (с учетом типа контента)."""
+        # Основной путь: публикация из лички пользователя (когда chat_id еще в памяти).
+        # Fallback после рестарта: публикация из копий в админ-чате.
+        source_chat_id = case.user_chat_id or settings.admin_chat_id
+        source_message_ids = (
+            case.source_message_ids
+            if case.user_chat_id
+            else (
+                # Предпочитаем чистый список контента (без служебных сообщений).
+                case.admin_content_message_ids
+                if case.admin_content_message_ids
+                # Legacy fallback: старые кейсы могли иметь только общий список.
+                else case.admin_message_ids
+            )
+        )
+        if not source_message_ids:
+            raise RuntimeError("Не удалось найти сообщения для публикации.")
+
         if case.is_media_group:
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -174,13 +191,13 @@ def create_admin_router(
             )
             await media_bridge.copy_many(
                 bot=bot,
-                from_chat_id=case.user_chat_id,
+                from_chat_id=source_chat_id,
                 to_chat_id=settings.publish_channel_id,
-                message_ids=case.source_message_ids,
+                message_ids=source_message_ids,
             )
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
-                text=f"Конец тейка из нескольких постов ({len(case.source_message_ids)}) ↑",
+                text=f"Конец тейка из нескольких постов ({len(source_message_ids)}) ↑",
             )
             return
 
@@ -199,8 +216,8 @@ def create_admin_router(
         if media_requires_separate_tags(case):
             await bot.copy_message(
                 chat_id=settings.publish_channel_id,
-                from_chat_id=case.user_chat_id,
-                message_id=case.source_message_ids[0],
+                from_chat_id=source_chat_id,
+                message_id=source_message_ids[0],
             )
             tags = tags_block(case)
             if tags:
@@ -209,14 +226,17 @@ def create_admin_router(
 
         await bot.copy_message(
             chat_id=settings.publish_channel_id,
-            from_chat_id=case.user_chat_id,
-            message_id=case.source_message_ids[0],
+            from_chat_id=source_chat_id,
+            message_id=source_message_ids[0],
             caption=composed,
             caption_entities=entities,
         )
 
     async def notify_user_published(bot: Bot, case: CaseRecord) -> None:
         """Уведомляет автора, что его анонимка реально опубликована."""
+        if case.user_chat_id is None:
+            # После рестарта chat_id автора в памяти уже нет — только публикуем.
+            return
         await bot.send_message(
             chat_id=case.user_chat_id,
             text="Ваша анонимка опубликована!",
@@ -345,6 +365,13 @@ def create_admin_router(
             return
 
         if action == "reply":
+            if case.user_chat_id is None:
+                # После рестарта reply нельзя выполнить без chat_id автора.
+                await query.answer(
+                    "После рестарта доступна только публикация: chat_id автора не восстановлен.",
+                    show_alert=True,
+                )
+                return
             nonlocal pending_reply_case_id
             pending_reply_case_id = case.case_id
             await query.answer("Отправьте следующее сообщение в чат.")
@@ -356,6 +383,13 @@ def create_admin_router(
             return
 
         if action == "ban":
+            if case.user_chat_id is None:
+                # Бан технически невозможен без chat_id в живой памяти процесса.
+                await query.answer(
+                    "После рестарта доступна только публикация: chat_id автора не восстановлен.",
+                    show_alert=True,
+                )
+                return
             if case.control_message_id is not None:
                 await query.bot.edit_message_reply_markup(
                     chat_id=settings.admin_chat_id,
@@ -745,6 +779,13 @@ def create_admin_router(
             await query.answer("Срок бана не найден.", show_alert=True)
             return
         duration_label, duration_seconds = selected
+        if case.user_chat_id is None:
+            # На старых кейсах после рестарта бан недоступен по той же причине.
+            await query.answer(
+                "После рестарта бан невозможен: chat_id автора не восстановлен.",
+                show_alert=True,
+            )
+            return
 
         until_ts = None
         if duration_seconds is not None:
@@ -896,6 +937,13 @@ def create_admin_router(
         except (ValueError, IndexError):
             await query.answer("Причина не найдена.", show_alert=True)
             return
+        if case.user_chat_id is None:
+            # Отклонение отправляет сообщение пользователю, поэтому без chat_id нельзя.
+            await query.answer(
+                "После рестарта отклонение недоступно: chat_id автора не восстановлен.",
+                show_alert=True,
+            )
+            return
 
         await query.bot.send_message(
             chat_id=case.user_chat_id,
@@ -922,6 +970,13 @@ def create_admin_router(
             return
         case = case_store.get_case(case_id)
         if not case or case.status != "open":
+            return
+        if case.user_chat_id is None:
+            # Защита от зависшего режима reply на кейсе, поднятом из open_cases.json.
+            await messages[0].bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text="После рестарта reply недоступен: chat_id автора не восстановлен.",
+            )
             return
 
         await media_bridge.copy_many(
@@ -981,6 +1036,14 @@ def create_admin_router(
         case = case_store.get_case(pending_case_id)
         if not case or case.status != "open":
             pending_reply_case_id = None
+            return
+        if case.user_chat_id is None:
+            pending_reply_case_id = None
+            # Очищаем pending и даём понятный сервисный ответ.
+            await message.bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text="После рестарта reply недоступен: chat_id автора не восстановлен.",
+            )
             return
 
         if message.media_group_id:
