@@ -219,16 +219,39 @@ def create_admin_router(
             )
             return
 
-        async def send_single_media_multi_block(
-            text_message: str,
-            include_tags_as_separate_message: bool,
+        async def send_single_media_with_split_parts(
             media_caption: str | None = None,
             media_caption_entities: list[MessageEntity] | None = None,
+            text_part: str | None = None,
+            tags_part: str | None = None,
         ) -> None:
+            """Публикует одиночный медиа-кейс без маркеров мультипоста.
+
+            Используется, когда caption переполняется: сохраняем исходное медиа,
+            а текст/теги переносим в отдельные сообщения после него.
+            """
+            await bot.copy_message(
+                chat_id=settings.publish_channel_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_ids[0],
+                caption=media_caption,
+                caption_entities=media_caption_entities,
+            )
+            if text_part:
+                await bot.send_message(
+                    chat_id=settings.publish_channel_id,
+                    text=text_part,
+                    entities=entities if text_part == base_text else None,
+                )
+            if tags_part:
+                await bot.send_message(chat_id=settings.publish_channel_id, text=tags_part)
+
+        async def send_single_media_as_multi_take_for_long_base() -> None:
+            """Публикует кейс как multi-тейк, если исходный текст медиа не влезает в caption."""
             posts_count = 1
-            if text_message:
+            if base_text:
                 posts_count += 1
-            if include_tags_as_separate_message and tags:
+            if tags:
                 posts_count += 1
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -238,16 +261,14 @@ def create_admin_router(
                 chat_id=settings.publish_channel_id,
                 from_chat_id=source_chat_id,
                 message_id=source_message_ids[0],
-                caption=media_caption,
-                caption_entities=media_caption_entities,
             )
-            if text_message:
+            if base_text:
                 await bot.send_message(
                     chat_id=settings.publish_channel_id,
-                    text=text_message,
-                    entities=entities if text_message == base_text else None,
+                    text=base_text,
+                    entities=entities,
                 )
-            if include_tags_as_separate_message and tags:
+            if tags:
                 await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -264,23 +285,19 @@ def create_admin_router(
                 await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
             return
 
-        # Premium-кейс: длинная подпись у медиа не помещается в caption.
-        # Тогда публикуем как "мультипост": медиа + текст отдельным сообщением.
+        # Premium-кейс: исходный пользовательский текст уже длиннее лимита caption.
+        # Это считается составным постом, поэтому публикуем как multi-тейк с маркерами.
         if len(base_text) > CAPTION_LIMIT:
-            await send_single_media_multi_block(
-                text_message=base_text,
-                include_tags_as_separate_message=bool(tags),
-            )
+            await send_single_media_as_multi_take_for_long_base()
             return
 
         # Если исходная подпись помещалась, но после добавления тегов стала слишком длинной,
-        # оставляем в caption исходный текст, а теги публикуем отдельным сообщением в том же блоке.
+        # сохраняем исходный caption как есть, а теги отправляем отдельным сообщением.
         if len(composed) > CAPTION_LIMIT:
-            await send_single_media_multi_block(
-                text_message="",
-                include_tags_as_separate_message=bool(tags),
+            await send_single_media_with_split_parts(
                 media_caption=base_text or None,
                 media_caption_entities=entities,
+                tags_part=tags or None,
             )
             return
 
