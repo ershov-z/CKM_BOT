@@ -168,6 +168,25 @@ class CaseStore:
         case = self.get_case(case_id)
         return bool(case and case.status == "open")
 
+    def find_open_case_by_user_message(
+        self,
+        user_chat_id: int,
+        message_id: int,
+    ) -> CaseRecord | None:
+        """Ищет открытый кейс по исходному сообщению пользователя.
+
+        В privacy-режиме опираемся на chat_id только в памяти процесса:
+        после рестарта часть кейсов может не матчиться (и это ожидаемо).
+        """
+        for case in self._cases.values():
+            if case.status != "open":
+                continue
+            if case.user_chat_id != user_chat_id:
+                continue
+            if message_id in case.source_message_ids:
+                return case
+        return None
+
     def set_pending_reply(self, admin_user_id: int, case_id: str) -> None:
         """Включает режим ожидания ответа от конкретного админа."""
         self._pending_reply_by_admin[admin_user_id] = case_id

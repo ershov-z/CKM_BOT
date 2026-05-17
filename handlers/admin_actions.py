@@ -458,7 +458,7 @@ def create_admin_router(
             await query.answer("Отправьте следующее сообщение в чат.")
             await query.bot.send_message(
                 chat_id=settings.admin_chat_id,
-                text="Режим ответа включён. Напишите следующее сообщение в чат без ответа на сообщение.",
+                text="Режим ответа включён. Напишите следующее сообщение в чат ответом на это сообщение.",
                 parse_mode="Markdown",
             )
             return

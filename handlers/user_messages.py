@@ -331,4 +331,50 @@ def create_user_router(
         # Обычное сообщение также идет в буфер пачки.
         await enqueue_user_messages([message])
 
+    @router.edited_message(F.chat.type == ChatType.PRIVATE)
+    async def on_user_edited_message(message: Message) -> None:
+        """Если пользователь отредактировал сообщение, шлем новую версию в админку."""
+        if not message.from_user or message.from_user.is_bot:
+            return
+        case = case_store.find_open_case_by_user_message(
+            user_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+        if not case:
+            return
+
+        await message.bot.send_message(
+            chat_id=settings.admin_chat_id,
+            text=(
+                f"Сервис: пользователь отредактировал сообщение в кейсе `{case.case_id}`.\n"
+                "Новая версия сообщения ниже."
+            ),
+            parse_mode="Markdown",
+        )
+
+        edited_text = (message.text or message.caption or "").strip()
+        edited_entities = list(message.entities or message.caption_entities or [])
+        # Важный fallback: длинная подпись медиа может не пройти через copy_message.
+        if message.content_type != "text" and len(edited_text) > CAPTION_LIMIT:
+            await media_bridge.copy_single(
+                bot=message.bot,
+                from_chat_id=message.chat.id,
+                to_chat_id=settings.admin_chat_id,
+                message_id=message.message_id,
+                caption="",
+            )
+            await message.bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text=edited_text,
+                entities=edited_entities or None,
+            )
+            return
+
+        await media_bridge.copy_single(
+            bot=message.bot,
+            from_chat_id=message.chat.id,
+            to_chat_id=settings.admin_chat_id,
+            message_id=message.message_id,
+        )
+
     return router
