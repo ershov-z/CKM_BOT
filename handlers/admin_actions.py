@@ -239,37 +239,39 @@ def create_admin_router(
                 return
 
             if len(composed) <= CAPTION_LIMIT:
-                await bot.copy_message(
-                    chat_id=settings.publish_channel_id,
-                    from_chat_id=source_chat_id,
-                    message_id=first_media_id,
-                    caption=composed,
-                    caption_entities=entities,
-                )
-                if other_media_ids:
-                    await media_bridge.copy_many(
-                        bot=bot,
-                        from_chat_id=source_chat_id,
-                        to_chat_id=settings.publish_channel_id,
-                        message_ids=other_media_ids,
-                    )
-                return
-
-            # Исходный caption влезает, а с тегами уже нет: теги отдельным постом.
-            await bot.copy_message(
-                chat_id=settings.publish_channel_id,
-                from_chat_id=source_chat_id,
-                message_id=first_media_id,
-                caption=base_text or None,
-                caption_entities=entities,
-            )
-            if other_media_ids:
-                await media_bridge.copy_many(
+                copied_ids = await media_bridge.copy_many(
                     bot=bot,
                     from_chat_id=source_chat_id,
                     to_chat_id=settings.publish_channel_id,
-                    message_ids=other_media_ids,
+                    message_ids=source_message_ids,
                 )
+                # Альбом уже скопирован как единая группа; теперь обновляем caption
+                # первого элемента, чтобы добавить теги, не ломая grouping.
+                if copied_ids:
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=settings.publish_channel_id,
+                            message_id=copied_ids[0],
+                            caption=composed,
+                            caption_entities=entities,
+                        )
+                    except TelegramBadRequest:
+                        # Если edit caption недоступен для конкретного медиа-типа,
+                        # не рвем альбом: публикуем теги отдельным сообщением.
+                        if tags:
+                            await bot.send_message(
+                                chat_id=settings.publish_channel_id,
+                                text=tags,
+                            )
+                return
+
+            # Исходный caption влезает, а с тегами уже нет: теги отдельным постом.
+            await media_bridge.copy_many(
+                bot=bot,
+                from_chat_id=source_chat_id,
+                to_chat_id=settings.publish_channel_id,
+                message_ids=source_message_ids,
+            )
             if tags:
                 await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
             return

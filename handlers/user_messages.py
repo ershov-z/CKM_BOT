@@ -213,35 +213,48 @@ def create_user_router(
                 )
                 if is_album:
                     # Telegram media group: в админке показываем как один кейс без маркеров multi.
-                    first_copied = await media_bridge.copy_single(
-                        bot=first.bot,
-                        from_chat_id=first.chat.id,
-                        to_chat_id=settings.admin_chat_id,
-                        message_id=source_message_ids[0],
-                        caption="" if len(single_content_text) > CAPTION_LIMIT else None,
-                    )
-                    rest_copied: list[int] = []
-                    if len(source_message_ids) > 1:
-                        rest_copied = await media_bridge.copy_many(
+                    copied_ids: list[int] = []
+                    text_message_id: int | None = None
+                    if len(single_content_text) > CAPTION_LIMIT:
+                        # Длинная подпись premium-поста: безопасно копируем без подписи,
+                        # иначе bot API может отклонить caption>1024.
+                        first_copied = await media_bridge.copy_single(
                             bot=first.bot,
                             from_chat_id=first.chat.id,
                             to_chat_id=settings.admin_chat_id,
-                            message_ids=source_message_ids[1:],
+                            message_id=source_message_ids[0],
+                            caption="",
                         )
-                    text_message_id: int | None = None
-                    if len(single_content_text) > CAPTION_LIMIT:
+                        copied_ids = [first_copied.message_id]
+                        if len(source_message_ids) > 1:
+                            rest_copied = await media_bridge.copy_many(
+                                bot=first.bot,
+                                from_chat_id=first.chat.id,
+                                to_chat_id=settings.admin_chat_id,
+                                message_ids=source_message_ids[1:],
+                            )
+                            copied_ids.extend(rest_copied)
                         text_message = await first.bot.send_message(
                             chat_id=settings.admin_chat_id,
                             text=single_content_text,
                             entities=single_content_entities or None,
                         )
                         text_message_id = text_message.message_id
+                    else:
+                        # Когда подпись в лимите — копируем весь альбом одним вызовом,
+                        # чтобы Telegram сохранил группировку media group.
+                        copied_ids = await media_bridge.copy_many(
+                            bot=first.bot,
+                            from_chat_id=first.chat.id,
+                            to_chat_id=settings.admin_chat_id,
+                            message_ids=source_message_ids,
+                        )
                     control = await first.bot.send_message(
                         chat_id=settings.admin_chat_id,
                         text=control_text,
                         reply_markup=keyboard,
                     )
-                    admin_message_ids = [first_copied.message_id, *rest_copied]
+                    admin_message_ids = [*copied_ids]
                     if text_message_id is not None:
                         admin_message_ids.append(text_message_id)
                     admin_message_ids.append(control.message_id)
@@ -256,7 +269,7 @@ def create_user_router(
                             is_composed_multi_post=False,
                             admin_message_ids=admin_message_ids,
                             # Для fallback-публикации после рестарта сохраняем только media IDs.
-                            admin_content_message_ids=[first_copied.message_id, *rest_copied],
+                            admin_content_message_ids=[*copied_ids],
                             control_message_id=control.message_id,
                             content_for_tagging=tagging_content,
                             single_content_text=single_content_text,
