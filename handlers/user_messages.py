@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from config import Settings
@@ -213,42 +214,33 @@ def create_user_router(
                 )
                 if is_album:
                     # Telegram media group: в админке показываем как один кейс без маркеров multi.
-                    copied_ids: list[int] = []
+                    copied_ids = await media_bridge.copy_many(
+                        bot=first.bot,
+                        from_chat_id=first.chat.id,
+                        to_chat_id=settings.admin_chat_id,
+                        message_ids=source_message_ids,
+                    )
                     text_message_id: int | None = None
                     if len(single_content_text) > CAPTION_LIMIT:
-                        # Длинная подпись premium-поста: безопасно копируем без подписи,
-                        # иначе bot API может отклонить caption>1024.
-                        first_copied = await media_bridge.copy_single(
-                            bot=first.bot,
-                            from_chat_id=first.chat.id,
-                            to_chat_id=settings.admin_chat_id,
-                            message_id=source_message_ids[0],
-                            caption="",
-                        )
-                        copied_ids = [first_copied.message_id]
-                        if len(source_message_ids) > 1:
-                            rest_copied = await media_bridge.copy_many(
-                                bot=first.bot,
-                                from_chat_id=first.chat.id,
-                                to_chat_id=settings.admin_chat_id,
-                                message_ids=source_message_ids[1:],
-                            )
-                            copied_ids.extend(rest_copied)
+                        # Если подпись слишком длинная, оставляем сам альбом целым,
+                        # но удаляем caption у первого элемента и отправляем текст отдельно.
+                        if copied_ids:
+                            try:
+                                await first.bot.edit_message_caption(
+                                    chat_id=settings.admin_chat_id,
+                                    message_id=copied_ids[0],
+                                    caption="",
+                                )
+                            except TelegramBadRequest:
+                                # Для некоторых типов/состояний caption может не редактироваться:
+                                # тогда оставляем как есть и все равно дублируем текст отдельно.
+                                pass
                         text_message = await first.bot.send_message(
                             chat_id=settings.admin_chat_id,
                             text=single_content_text,
                             entities=single_content_entities or None,
                         )
                         text_message_id = text_message.message_id
-                    else:
-                        # Когда подпись в лимите — копируем весь альбом одним вызовом,
-                        # чтобы Telegram сохранил группировку media group.
-                        copied_ids = await media_bridge.copy_many(
-                            bot=first.bot,
-                            from_chat_id=first.chat.id,
-                            to_chat_id=settings.admin_chat_id,
-                            message_ids=source_message_ids,
-                        )
                     control = await first.bot.send_message(
                         chat_id=settings.admin_chat_id,
                         text=control_text,
@@ -361,7 +353,10 @@ def create_user_router(
 
     async def flush_media_group(group_key: tuple[int, str]) -> None:
         """Собирает альбом (media_group) в единый список сообщений."""
-        await asyncio.sleep(1.0)
+        try:
+            await asyncio.sleep(1.2)
+        except asyncio.CancelledError:
+            return
         messages = sorted(
             media_group_buffer.pop(group_key, []),
             key=lambda item: item.message_id,
@@ -394,10 +389,12 @@ def create_user_router(
         if message.media_group_id:
             key = (message.chat.id, message.media_group_id)
             media_group_buffer.setdefault(key, []).append(message)
-            if key not in media_group_tasks:
-                media_group_tasks[key] = asyncio.create_task(
-                    flush_media_group(key)
-                )
+            # Debounce для media_group: перезапускаем таймер на каждый новый элемент,
+            # чтобы не нарезать один альбом на несколько кейсов.
+            task = media_group_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
+            media_group_tasks[key] = asyncio.create_task(flush_media_group(key))
             return
         # Обычное сообщение также идет в буфер пачки.
         await enqueue_user_messages([message])
