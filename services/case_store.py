@@ -24,6 +24,8 @@ class CaseRecord:
     source_message_ids: list[int]
     # True, если кейс собран из нескольких сообщений/альбома.
     is_media_group: bool
+    # True, если кейс должен публиковаться как "тейк из нескольких постов" с маркерами.
+    is_composed_multi_post: bool = False
     # ID сообщений, отправленных ботом в админ-чат по этому кейсу.
     admin_message_ids: list[int] = field(default_factory=list)
     # Только контентные сообщения кейса в админ-чате (без служебных маркеров/кнопок).
@@ -65,6 +67,7 @@ class CaseStore:
             "case_id": case.case_id,
             "source_message_ids": case.source_message_ids,
             "is_media_group": case.is_media_group,
+            "is_composed_multi_post": case.is_composed_multi_post,
             "admin_message_ids": case.admin_message_ids,
             "admin_content_message_ids": case.admin_content_message_ids,
             "control_message_id": case.control_message_id,
@@ -89,6 +92,9 @@ class CaseStore:
                 ),
                 source_message_ids=[int(item) for item in payload["source_message_ids"]],
                 is_media_group=bool(payload["is_media_group"]),
+                is_composed_multi_post=bool(
+                    payload.get("is_composed_multi_post", bool(payload["is_media_group"]))
+                ),
                 admin_message_ids=[int(item) for item in payload.get("admin_message_ids", [])],
                 admin_content_message_ids=[
                     int(item) for item in payload.get("admin_content_message_ids", [])

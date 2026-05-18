@@ -208,49 +208,107 @@ def create_user_router(
             # Маркеры "начало/конец" нужны лишь для удобства чтения модераторами
             # и не несут персональных данных пользователя.
             else:
-                posts_count = len(source_message_ids)
-                start_marker = await first.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+                is_album = bool(first.media_group_id) and all(
+                    msg.media_group_id == first.media_group_id for msg in messages
                 )
-                copied_ids = await media_bridge.copy_many(
-                    bot=first.bot,
-                    from_chat_id=first.chat.id,
-                    to_chat_id=settings.admin_chat_id,
-                    message_ids=source_message_ids,
-                )
-                end_marker = await first.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
-                )
-                control = await first.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=control_text,
-                    reply_markup=keyboard,
-                )
-                case_store.add_case(
-                    CaseRecord(
-                        case_id=case_id,
-                        # chat_id держим только в памяти процесса.
-                        # На диск он не сериализуется (см. CaseStore._serialize_case).
-                        user_chat_id=first.chat.id,
-                        source_message_ids=source_message_ids,
-                        is_media_group=True,
-                        admin_message_ids=[
-                            start_marker.message_id,
-                            *copied_ids,
-                            end_marker.message_id,
-                            control.message_id,
-                        ],
-                        # В мультикейсе берём только контентные сообщения, без маркеров.
-                        admin_content_message_ids=[*copied_ids],
-                        control_message_id=control.message_id,
-                        content_for_tagging=tagging_content,
-                        single_content_text=single_content_text,
-                        single_content_entities=single_content_entities,
-                        single_content_type=single_content_type,
+                if is_album:
+                    # Telegram media group: в админке показываем как один кейс без маркеров multi.
+                    first_copied = await media_bridge.copy_single(
+                        bot=first.bot,
+                        from_chat_id=first.chat.id,
+                        to_chat_id=settings.admin_chat_id,
+                        message_id=source_message_ids[0],
+                        caption="" if len(single_content_text) > CAPTION_LIMIT else None,
                     )
-                )
+                    rest_copied: list[int] = []
+                    if len(source_message_ids) > 1:
+                        rest_copied = await media_bridge.copy_many(
+                            bot=first.bot,
+                            from_chat_id=first.chat.id,
+                            to_chat_id=settings.admin_chat_id,
+                            message_ids=source_message_ids[1:],
+                        )
+                    text_message_id: int | None = None
+                    if len(single_content_text) > CAPTION_LIMIT:
+                        text_message = await first.bot.send_message(
+                            chat_id=settings.admin_chat_id,
+                            text=single_content_text,
+                            entities=single_content_entities or None,
+                        )
+                        text_message_id = text_message.message_id
+                    control = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=control_text,
+                        reply_markup=keyboard,
+                    )
+                    admin_message_ids = [first_copied.message_id, *rest_copied]
+                    if text_message_id is not None:
+                        admin_message_ids.append(text_message_id)
+                    admin_message_ids.append(control.message_id)
+                    case_store.add_case(
+                        CaseRecord(
+                            case_id=case_id,
+                            # chat_id держим только в памяти процесса.
+                            # На диск он не сериализуется (см. CaseStore._serialize_case).
+                            user_chat_id=first.chat.id,
+                            source_message_ids=source_message_ids,
+                            is_media_group=True,
+                            is_composed_multi_post=False,
+                            admin_message_ids=admin_message_ids,
+                            # Для fallback-публикации после рестарта сохраняем только media IDs.
+                            admin_content_message_ids=[first_copied.message_id, *rest_copied],
+                            control_message_id=control.message_id,
+                            content_for_tagging=tagging_content,
+                            single_content_text=single_content_text,
+                            single_content_entities=single_content_entities,
+                            single_content_type=single_content_type,
+                        )
+                    )
+                else:
+                    posts_count = len(source_message_ids)
+                    start_marker = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+                    )
+                    copied_ids = await media_bridge.copy_many(
+                        bot=first.bot,
+                        from_chat_id=first.chat.id,
+                        to_chat_id=settings.admin_chat_id,
+                        message_ids=source_message_ids,
+                    )
+                    end_marker = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+                    )
+                    control = await first.bot.send_message(
+                        chat_id=settings.admin_chat_id,
+                        text=control_text,
+                        reply_markup=keyboard,
+                    )
+                    case_store.add_case(
+                        CaseRecord(
+                            case_id=case_id,
+                            # chat_id держим только в памяти процесса.
+                            # На диск он не сериализуется (см. CaseStore._serialize_case).
+                            user_chat_id=first.chat.id,
+                            source_message_ids=source_message_ids,
+                            is_media_group=True,
+                            is_composed_multi_post=True,
+                            admin_message_ids=[
+                                start_marker.message_id,
+                                *copied_ids,
+                                end_marker.message_id,
+                                control.message_id,
+                            ],
+                            # В мультикейсе берём только контентные сообщения, без маркеров.
+                            admin_content_message_ids=[*copied_ids],
+                            control_message_id=control.message_id,
+                            content_for_tagging=tagging_content,
+                            single_content_text=single_content_text,
+                            single_content_entities=single_content_entities,
+                            single_content_type=single_content_type,
+                        )
+                    )
 
             # Подтверждение пользователю, что сообщение принято.
             await first.bot.send_message(

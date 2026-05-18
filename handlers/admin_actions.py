@@ -188,7 +188,14 @@ def create_admin_router(
         if not source_message_ids:
             raise RuntimeError("Не удалось найти сообщения для публикации.")
 
-        if case.is_media_group:
+        base_text = (case.single_content_text or "").strip()
+        tags = tags_block(case)
+        composed = compose_single_text_with_tags(case)
+        entities: list[MessageEntity] | None = (
+            case.single_content_entities if case.single_content_entities else None
+        )
+
+        if case.is_media_group and case.is_composed_multi_post:
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
                 text=build_multi_start_text(case),
@@ -204,13 +211,69 @@ def create_admin_router(
                 text=f"Конец тейка из нескольких постов ({len(source_message_ids)}) ↑",
             )
             return
+        if case.is_media_group and not case.is_composed_multi_post:
+            # Media group публикуем без маркеров multi: как один "обычный" кейс.
+            first_media_id = source_message_ids[0]
+            other_media_ids = source_message_ids[1:]
+            if len(base_text) > CAPTION_LIMIT:
+                await bot.copy_message(
+                    chat_id=settings.publish_channel_id,
+                    from_chat_id=source_chat_id,
+                    message_id=first_media_id,
+                    caption="",
+                )
+                if other_media_ids:
+                    await media_bridge.copy_many(
+                        bot=bot,
+                        from_chat_id=source_chat_id,
+                        to_chat_id=settings.publish_channel_id,
+                        message_ids=other_media_ids,
+                    )
+                await bot.send_message(
+                    chat_id=settings.publish_channel_id,
+                    text=base_text,
+                    entities=entities,
+                )
+                if tags:
+                    await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+                return
 
-        base_text = (case.single_content_text or "").strip()
-        tags = tags_block(case)
-        composed = compose_single_text_with_tags(case)
-        entities: list[MessageEntity] | None = (
-            case.single_content_entities if case.single_content_entities else None
-        )
+            if len(composed) <= CAPTION_LIMIT:
+                await bot.copy_message(
+                    chat_id=settings.publish_channel_id,
+                    from_chat_id=source_chat_id,
+                    message_id=first_media_id,
+                    caption=composed,
+                    caption_entities=entities,
+                )
+                if other_media_ids:
+                    await media_bridge.copy_many(
+                        bot=bot,
+                        from_chat_id=source_chat_id,
+                        to_chat_id=settings.publish_channel_id,
+                        message_ids=other_media_ids,
+                    )
+                return
+
+            # Исходный caption влезает, а с тегами уже нет: теги отдельным постом.
+            await bot.copy_message(
+                chat_id=settings.publish_channel_id,
+                from_chat_id=source_chat_id,
+                message_id=first_media_id,
+                caption=base_text or None,
+                caption_entities=entities,
+            )
+            if other_media_ids:
+                await media_bridge.copy_many(
+                    bot=bot,
+                    from_chat_id=source_chat_id,
+                    to_chat_id=settings.publish_channel_id,
+                    message_ids=other_media_ids,
+                )
+            if tags:
+                await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+            return
+
         if case.single_content_type == "text":
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -1117,16 +1180,10 @@ def create_admin_router(
             to_chat_id=case.user_chat_id,
             message_ids=[msg.message_id for msg in messages],
         )
-        await finalize_case(
-            messages[0].bot,
-            case,
-            "replied",
-            "ответ отправлен пользователю.",
-            send_case_note=False,
-        )
         await messages[0].bot.send_message(
             chat_id=settings.admin_chat_id,
-            text="Сообщение отправлено пользователю!",
+            text=f"Сообщение отправлено пользователю! Кейс `{case.case_id}` остается открытым.",
+            parse_mode="Markdown",
         )
 
     @router.message(F.chat.id == settings.admin_chat_id)
@@ -1195,16 +1252,10 @@ def create_admin_router(
             to_chat_id=case.user_chat_id,
             message_id=message.message_id,
         )
-        await finalize_case(
-            message.bot,
-            case,
-            "replied",
-            "ответ отправлен пользователю.",
-            send_case_note=False,
-        )
         await message.bot.send_message(
             chat_id=settings.admin_chat_id,
-            text="Сообщение отправлено пользователю!",
+            text=f"Сообщение отправлено пользователю! Кейс `{case.case_id}` остается открытым.",
+            parse_mode="Markdown",
         )
 
     return router
