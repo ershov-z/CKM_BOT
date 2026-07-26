@@ -37,6 +37,7 @@ from services.reject_reasons import load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
+SENT_VIA = "Прислано через @backstage_staff_bot"
 
 
 def create_admin_router(
@@ -98,14 +99,16 @@ def create_admin_router(
         return "\n".join(case.selected_tags).strip()
 
     def compose_single_text_with_tags(case: CaseRecord) -> str:
-        """Склеивает текст одиночного поста и блок тегов."""
+        """Склеивает текст поста, подпись «Прислано через…» и блок тегов."""
         base = (case.single_content_text or "").strip()
         tags = tags_block(case)
-        if base and tags:
-            return f"{base}\n\n{tags}"
+        parts: list[str] = []
+        if base:
+            parts.append(base)
+        parts.append(SENT_VIA)
         if tags:
-            return tags
-        return base
+            parts.append(tags)
+        return "\n\n".join(parts)
 
     def build_tag_preview_text(case: CaseRecord) -> str:
         """Формирует текст предпросмотра публикации (для рабочей карточки кейса)."""
@@ -195,6 +198,12 @@ def create_admin_router(
             case.single_content_entities if case.single_content_entities else None
         )
 
+        async def send_sent_via_then_tags(tags_part: str | None = None) -> None:
+            """Досылает подпись «Прислано через…» и опционально теги отдельными сообщениями."""
+            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+            if tags_part:
+                await bot.send_message(chat_id=settings.publish_channel_id, text=tags_part)
+
         if case.is_media_group and case.is_composed_multi_post:
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -210,6 +219,7 @@ def create_admin_router(
                 chat_id=settings.publish_channel_id,
                 text=f"Конец тейка из нескольких постов ({len(source_message_ids)}) ↑",
             )
+            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
             return
         if case.is_media_group and not case.is_composed_multi_post:
             # Media group публикуем без маркеров multi: как один "обычный" кейс.
@@ -234,8 +244,7 @@ def create_admin_router(
                     text=base_text,
                     entities=entities,
                 )
-                if tags:
-                    await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+                await send_sent_via_then_tags(tags or None)
                 return
 
             if len(composed) <= CAPTION_LIMIT:
@@ -257,23 +266,18 @@ def create_admin_router(
                         )
                     except TelegramBadRequest:
                         # Если edit caption недоступен для конкретного медиа-типа,
-                        # не рвем альбом: публикуем теги отдельным сообщением.
-                        if tags:
-                            await bot.send_message(
-                                chat_id=settings.publish_channel_id,
-                                text=tags,
-                            )
+                        # не рвем альбом: публикуем подпись и теги отдельными сообщениями.
+                        await send_sent_via_then_tags(tags or None)
                 return
 
-            # Исходный caption влезает, а с тегами уже нет: теги отдельным постом.
+            # Исходный caption влезает, а с подписью/тегами уже нет: досылаем отдельно.
             await media_bridge.copy_many(
                 bot=bot,
                 from_chat_id=source_chat_id,
                 to_chat_id=settings.publish_channel_id,
                 message_ids=source_message_ids,
             )
-            if tags:
-                await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+            await send_sent_via_then_tags(tags or None)
             return
 
         if case.single_content_type == "text":
@@ -293,7 +297,7 @@ def create_admin_router(
             """Публикует одиночный медиа-кейс без маркеров мультипоста.
 
             Используется, когда caption переполняется: сохраняем исходное медиа,
-            а текст/теги переносим в отдельные сообщения после него.
+            а текст/подпись/теги переносим в отдельные сообщения после него.
             """
             await bot.copy_message(
                 chat_id=settings.publish_channel_id,
@@ -308,8 +312,7 @@ def create_admin_router(
                     text=text_part,
                     entities=entities if text_part == base_text else None,
                 )
-            if tags_part:
-                await bot.send_message(chat_id=settings.publish_channel_id, text=tags_part)
+            await send_sent_via_then_tags(tags_part)
 
         async def send_single_media_as_multi_take_for_long_base() -> None:
             """Публикует кейс как multi-тейк, если исходный текст медиа не влезает в caption."""
@@ -339,6 +342,7 @@ def create_admin_router(
                 chat_id=settings.publish_channel_id,
                 text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
             )
+            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
 
         if media_requires_separate_tags(case):
             await bot.copy_message(
@@ -346,8 +350,7 @@ def create_admin_router(
                 from_chat_id=source_chat_id,
                 message_id=source_message_ids[0],
             )
-            if tags:
-                await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
+            await send_sent_via_then_tags(tags or None)
             return
 
         # Premium-кейс: исходный пользовательский текст уже длиннее лимита caption.
@@ -356,8 +359,8 @@ def create_admin_router(
             await send_single_media_as_multi_take_for_long_base()
             return
 
-        # Если исходная подпись помещалась, но после добавления тегов стала слишком длинной,
-        # сохраняем исходный caption как есть, а теги отправляем отдельным сообщением.
+        # Если исходная подпись помещалась, но после добавления «Прислано…»/тегов
+        # стала слишком длинной: сохраняем исходный caption, остальное — отдельно.
         if len(composed) > CAPTION_LIMIT:
             await send_single_media_with_split_parts(
                 media_caption=base_text or None,
