@@ -16,7 +16,6 @@ from uuid import uuid4
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from config import Settings
@@ -214,27 +213,18 @@ def create_user_router(
                 )
                 if is_album:
                     # Telegram media group: в админке показываем как один кейс без маркеров multi.
+                    # Длинную подпись снимаем на копировании, иначе copy_messages падает
+                    # и fallback по одному рвёт альбом.
+                    caption_too_long = len(single_content_text) > CAPTION_LIMIT
                     copied_ids = await media_bridge.copy_many(
                         bot=first.bot,
                         from_chat_id=first.chat.id,
                         to_chat_id=settings.admin_chat_id,
                         message_ids=source_message_ids,
+                        remove_caption=caption_too_long,
                     )
                     text_message_id: int | None = None
-                    if len(single_content_text) > CAPTION_LIMIT:
-                        # Если подпись слишком длинная, оставляем сам альбом целым,
-                        # но удаляем caption у первого элемента и отправляем текст отдельно.
-                        if copied_ids:
-                            try:
-                                await first.bot.edit_message_caption(
-                                    chat_id=settings.admin_chat_id,
-                                    message_id=copied_ids[0],
-                                    caption="",
-                                )
-                            except TelegramBadRequest:
-                                # Для некоторых типов/состояний caption может не редактироваться:
-                                # тогда оставляем как есть и все равно дублируем текст отдельно.
-                                pass
+                    if caption_too_long:
                         text_message = await first.bot.send_message(
                             chat_id=settings.admin_chat_id,
                             text=single_content_text,

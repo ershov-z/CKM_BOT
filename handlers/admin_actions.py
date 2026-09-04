@@ -37,6 +37,7 @@ from services.reject_reasons import format_admin_reject_guide, load_reject_reaso
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
+TEXT_LIMIT = 4096
 SENT_VIA = "Прислано через @backstage_staff_bot"
 
 
@@ -199,10 +200,35 @@ def create_admin_router(
         )
 
         async def send_sent_via_then_tags(tags_part: str | None = None) -> None:
-            """Досылает подпись «Прислано через…» и опционально теги отдельными сообщениями."""
-            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+            """Досылает подпись «Прислано через…» и теги одним сообщением."""
             if tags_part:
-                await bot.send_message(chat_id=settings.publish_channel_id, text=tags_part)
+                await bot.send_message(
+                    chat_id=settings.publish_channel_id,
+                    text=f"{SENT_VIA}\n\n{tags_part}",
+                )
+                return
+            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+
+        async def send_text_followup_after_album(
+            base_text: str,
+            composed: str,
+            entities: list[MessageEntity] | None,
+            tags_part: str | None,
+        ) -> None:
+            """После альбома досылает длинный текст постом, не дробя подпись и теги."""
+            if len(composed) <= TEXT_LIMIT:
+                await bot.send_message(
+                    chat_id=settings.publish_channel_id,
+                    text=composed,
+                    entities=entities,
+                )
+                return
+            await bot.send_message(
+                chat_id=settings.publish_channel_id,
+                text=base_text,
+                entities=entities,
+            )
+            await send_sent_via_then_tags(tags_part)
 
         if case.is_media_group and case.is_composed_multi_post:
             await bot.send_message(
@@ -223,28 +249,22 @@ def create_admin_router(
             return
         if case.is_media_group and not case.is_composed_multi_post:
             # Media group публикуем без маркеров multi: как один "обычный" кейс.
-            first_media_id = source_message_ids[0]
-            other_media_ids = source_message_ids[1:]
+            # Альбом всегда копируем целиком. Нельзя copy_message(первое) + copy_many(остальные):
+            # Telegram тогда отклеивает первую картинку от группы.
             if len(base_text) > CAPTION_LIMIT:
-                await bot.copy_message(
-                    chat_id=settings.publish_channel_id,
+                await media_bridge.copy_many(
+                    bot=bot,
                     from_chat_id=source_chat_id,
-                    message_id=first_media_id,
-                    caption="",
+                    to_chat_id=settings.publish_channel_id,
+                    message_ids=source_message_ids,
+                    remove_caption=True,
                 )
-                if other_media_ids:
-                    await media_bridge.copy_many(
-                        bot=bot,
-                        from_chat_id=source_chat_id,
-                        to_chat_id=settings.publish_channel_id,
-                        message_ids=other_media_ids,
-                    )
-                await bot.send_message(
-                    chat_id=settings.publish_channel_id,
-                    text=base_text,
+                await send_text_followup_after_album(
+                    base_text=base_text,
+                    composed=composed,
                     entities=entities,
+                    tags_part=tags or None,
                 )
-                await send_sent_via_then_tags(tags or None)
                 return
 
             if len(composed) <= CAPTION_LIMIT:
@@ -266,7 +286,7 @@ def create_admin_router(
                         )
                     except TelegramBadRequest:
                         # Если edit caption недоступен для конкретного медиа-типа,
-                        # не рвем альбом: публикуем подпись и теги отдельными сообщениями.
+                        # не рвем альбом: публикуем подпись и теги отдельным сообщением.
                         await send_sent_via_then_tags(tags or None)
                 return
 
