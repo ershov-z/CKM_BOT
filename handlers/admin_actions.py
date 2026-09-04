@@ -33,7 +33,7 @@ from handlers.ui import (
 from services.ban_store import BanStore
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
-from services.reject_reasons import load_reject_reasons
+from services.reject_reasons import format_admin_reject_guide, load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
@@ -503,11 +503,22 @@ def create_admin_router(
         if action == "reject":
             reasons = load_reject_reasons(reasons_path)
             if case.control_message_id is not None:
-                await query.bot.edit_message_reply_markup(
-                    chat_id=settings.admin_chat_id,
-                    message_id=case.control_message_id,
-                    reply_markup=reject_reasons_keyboard(case.case_id, reasons),
-                )
+                if query.message and query.message.text:
+                    case.control_text_backup = query.message.text
+                    case.control_entities_backup = list(query.message.entities or [])
+                try:
+                    await query.bot.edit_message_text(
+                        chat_id=settings.admin_chat_id,
+                        message_id=case.control_message_id,
+                        text=format_admin_reject_guide(reasons),
+                        reply_markup=reject_reasons_keyboard(case.case_id, reasons),
+                    )
+                except TelegramBadRequest:
+                    await query.bot.edit_message_reply_markup(
+                        chat_id=settings.admin_chat_id,
+                        message_id=case.control_message_id,
+                        reply_markup=reject_reasons_keyboard(case.case_id, reasons),
+                    )
             await query.answer("Выберите причину отклонения.")
             return
 
@@ -1145,11 +1156,24 @@ def create_admin_router(
             await query.answer("Кейс уже обработан или не найден.", show_alert=True)
             return
         if case.control_message_id is not None:
-            await query.bot.edit_message_reply_markup(
-                chat_id=settings.admin_chat_id,
-                message_id=case.control_message_id,
-                reply_markup=moderation_keyboard(case.case_id),
-            )
+            restored_text = case.control_text_backup or "Выберите действия с анонимкой"
+            restored_entities = case.control_entities_backup or None
+            try:
+                await query.bot.edit_message_text(
+                    chat_id=settings.admin_chat_id,
+                    message_id=case.control_message_id,
+                    text=restored_text,
+                    entities=restored_entities,
+                    reply_markup=moderation_keyboard(case.case_id),
+                )
+            except TelegramBadRequest:
+                await query.bot.edit_message_reply_markup(
+                    chat_id=settings.admin_chat_id,
+                    message_id=case.control_message_id,
+                    reply_markup=moderation_keyboard(case.case_id),
+                )
+            case.control_text_backup = None
+            case.control_entities_backup = []
         await query.answer("Возврат к действиям кейса.")
 
     async def flush_reply_media_group(group_key: tuple[int, str]) -> None:

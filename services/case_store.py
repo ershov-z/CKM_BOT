@@ -44,6 +44,10 @@ class CaseRecord:
     selected_tags: list[str] = field(default_factory=list)
     # Флаг, что админ сейчас редактирует теги.
     is_waiting_tag_edit: bool = False
+    # Текст служебного сообщения до экрана выбора причины отклонения.
+    control_text_backup: str | None = None
+    # Entities того же сообщения, чтобы можно было вернуть предпросмотр без потери разметки.
+    control_entities_backup: list[MessageEntity] = field(default_factory=list)
     # Статус кейса (open/published/rejected/replied/banned...).
     status: str = "open"
 

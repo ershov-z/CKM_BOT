@@ -9,10 +9,21 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class RejectReason:
-    """Одна причина отклонения: текст на кнопке и текст ответа пользователю."""
+    """Одна причина отклонения: кнопка, подсказка админу и текст пользователю."""
 
     button_name: str
     reply_text: str
+    admin_description: str = ""
+
+
+def format_admin_reject_guide(reasons: list[RejectReason]) -> str:
+    """Собирает памятку для модераторов на экране выбора причины."""
+    lines = ["Выберите причину отклонения.", "Пользователь получит готовый текст выбранной причины.", ""]
+    for reason in reasons:
+        description = reason.admin_description or reason.button_name
+        lines.append(f"• {reason.button_name}")
+        lines.append(f"  {description}")
+    return "\n".join(lines).strip()
 
 
 def load_reject_reasons(path: str | Path) -> list[RejectReason]:
@@ -38,9 +49,16 @@ def load_reject_reasons(path: str | Path) -> list[RejectReason]:
 
         button_name = str(item.get("button_name", "")).strip()
         reply_text = str(item.get("reply_text", "")).strip()
+        admin_description = str(item.get("admin_description", "")).strip()
         if not button_name or not reply_text:
             continue
-        reasons.append(RejectReason(button_name=button_name, reply_text=reply_text))
+        reasons.append(
+            RejectReason(
+                button_name=button_name,
+                reply_text=reply_text,
+                admin_description=admin_description,
+            )
+        )
 
     if not reasons:
         raise RuntimeError("Reject reasons file must not be empty.")
