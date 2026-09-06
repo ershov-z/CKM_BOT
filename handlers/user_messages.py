@@ -23,6 +23,7 @@ from handlers.ui import moderation_keyboard
 from services.ban_store import BanStore
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
+from services.message_content import extract_message_text, resolve_content_type
 
 CAPTION_LIMIT = 1024
 
@@ -77,7 +78,7 @@ def create_user_router(
         """Собирает текст для LLM-тегирования из набора сообщений кейса."""
         chunks: list[str] = []
         for message in messages:
-            text = (message.text or message.caption or "").strip()
+            text = extract_message_text(message)
             if text:
                 chunks.append(text)
                 continue
@@ -105,9 +106,9 @@ def create_user_router(
         keyboard = moderation_keyboard(case_id)
         control_text = build_reply_context_text(first)
         tagging_content = build_tagging_content(messages)
-        single_content_text = (first.text or first.caption or "").strip()
+        single_content_text = extract_message_text(first)
         single_content_entities = list(first.entities or first.caption_entities or [])
-        single_content_type = first.content_type
+        single_content_type = resolve_content_type(first)
 
         # Отправляем кейсы в админку последовательно, чтобы не ломать порядок сообщений.
         async with case_send_lock:

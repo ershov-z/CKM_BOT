@@ -14,9 +14,11 @@ import asyncio
 import re
 import time
 from datetime import datetime
+from uuid import uuid4
 
 from aiogram import F, Bot, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, MessageEntity
 
 from config import Settings
@@ -31,14 +33,21 @@ from handlers.ui import (
     unban_request_keyboard,
 )
 from services.ban_store import BanStore
-from services.case_store import CaseRecord, CaseStore
+from services.case_store import CaseRecord, CaseStore, RepublishSnapshot
 from services.media_bridge import MediaBridge
+from services.message_content import (
+    content_rejects_caption,
+    extract_message_text,
+    is_rich_message,
+    resolve_content_type,
+)
 from services.reject_reasons import format_admin_reject_guide, load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
 TEXT_LIMIT = 4096
 SENT_VIA = "Прислано через @backstage_staff_bot"
+CASE_ID_RE = re.compile(r"Кейс `([0-9a-fA-F]{8})`")
 
 
 def create_admin_router(
@@ -137,6 +146,13 @@ def create_admin_router(
         """Типы, где безопаснее отправлять теги отдельным сообщением (без подписи)."""
         return case.single_content_type in {"audio", "voice", "video_note"}
 
+    def message_has_sent_via(message: Message | None) -> bool:
+        """Проверяет, что в скопированном сообщении уже есть служебная подпись."""
+        if message is None:
+            return False
+        blob = "\n".join(part for part in (message.text, message.caption) if part)
+        return SENT_VIA in blob
+
     async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
         """Обновляет ОДНО рабочее сообщение-карточку предпросмотра для кейса."""
         preview_text = build_tag_preview_text(case)
@@ -152,6 +168,7 @@ def create_admin_router(
                 reply_markup=tagged_preview_keyboard(case.case_id),
             )
             case.control_message_id = created.message_id
+            case_store.index_case(case)
             return
 
         try:
@@ -208,6 +225,37 @@ def create_admin_router(
                 )
                 return
             await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+
+        async def copy_single_for_publish(
+            caption: str | None = None,
+            caption_entities: list[MessageEntity] | None = None,
+        ) -> Message:
+            """Копирует исходный пост. Если caption не принялся — копирует как есть."""
+            if caption is not None:
+                try:
+                    return await bot.copy_message(
+                        chat_id=settings.publish_channel_id,
+                        from_chat_id=source_chat_id,
+                        message_id=source_message_ids[0],
+                        caption=caption,
+                        caption_entities=caption_entities,
+                    )
+                except TelegramBadRequest:
+                    pass
+            return await bot.copy_message(
+                chat_id=settings.publish_channel_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_ids[0],
+            )
+
+        async def ensure_footer_after_copy(
+            copied: Message | None,
+            tags_part: str | None,
+        ) -> None:
+            """Если copy не вшил подпись и теги, досылает их отдельным сообщением."""
+            if message_has_sent_via(copied):
+                return
+            await send_sent_via_then_tags(tags_part)
 
         async def send_text_followup_after_album(
             base_text: str,
@@ -288,6 +336,8 @@ def create_admin_router(
                         # Если edit caption недоступен для конкретного медиа-типа,
                         # не рвем альбом: публикуем подпись и теги отдельным сообщением.
                         await send_sent_via_then_tags(tags or None)
+                else:
+                    await send_sent_via_then_tags(tags or None)
                 return
 
             # Исходный caption влезает, а с подписью/тегами уже нет: досылаем отдельно.
@@ -300,7 +350,20 @@ def create_admin_router(
             await send_sent_via_then_tags(tags or None)
             return
 
+        if content_rejects_caption(case.single_content_type):
+            # Rich-посты с картинками внутри текста и прочие типы без caption:
+            # copy_message(caption=...) либо падает, либо копирует оригинал без хвоста.
+            copied = await copy_single_for_publish()
+            await ensure_footer_after_copy(copied, tags or None)
+            return
+
         if case.single_content_type == "text":
+            if case.user_chat_id is None:
+                # После рестарта или /again админская копия может быть rich-постом
+                # с картинками внутри текста. send_message оставил бы только текст.
+                copied = await copy_single_for_publish()
+                await ensure_footer_after_copy(copied, tags or None)
+                return
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
                 text=composed,
@@ -319,10 +382,7 @@ def create_admin_router(
             Используется, когда caption переполняется: сохраняем исходное медиа,
             а текст/подпись/теги переносим в отдельные сообщения после него.
             """
-            await bot.copy_message(
-                chat_id=settings.publish_channel_id,
-                from_chat_id=source_chat_id,
-                message_id=source_message_ids[0],
+            await copy_single_for_publish(
                 caption=media_caption,
                 caption_entities=media_caption_entities,
             )
@@ -389,13 +449,11 @@ def create_admin_router(
             )
             return
 
-        await bot.copy_message(
-            chat_id=settings.publish_channel_id,
-            from_chat_id=source_chat_id,
-            message_id=source_message_ids[0],
+        copied = await copy_single_for_publish(
             caption=composed,
             caption_entities=entities,
         )
+        await ensure_footer_after_copy(copied, tags or None)
 
     async def notify_user_published(bot: Bot, case: CaseRecord) -> None:
         """Уведомляет автора, что его анонимка реально опубликована."""
@@ -433,11 +491,163 @@ def create_admin_router(
         # дольше необходимого для модерации времени.
         case_store.mark_done(case.case_id, status)
         if send_case_note:
-            await bot.send_message(
+            note_message = await bot.send_message(
                 chat_id=settings.admin_chat_id,
                 text=f"Кейс `{case.case_id}`: {note}",
                 parse_mode="Markdown",
             )
+            case_store.index_case(case, extra_message_ids=[note_message.message_id])
+
+    def snapshot_from_live_case(case: CaseRecord) -> RepublishSnapshot:
+        return RepublishSnapshot(
+            case_id=case.case_id,
+            admin_content_message_ids=list(case.admin_content_message_ids),
+            is_media_group=case.is_media_group,
+            is_composed_multi_post=case.is_composed_multi_post,
+            single_content_text=case.single_content_text,
+            single_content_type=case.single_content_type,
+            content_for_tagging=case.content_for_tagging,
+            selected_tags=list(case.selected_tags),
+        )
+
+    def snapshot_from_reply(replied: Message) -> RepublishSnapshot:
+        text = extract_message_text(replied)
+        content_type = resolve_content_type(replied)
+        return RepublishSnapshot(
+            case_id="",
+            admin_content_message_ids=[replied.message_id],
+            is_media_group=bool(replied.media_group_id),
+            is_composed_multi_post=False,
+            single_content_text=text,
+            single_content_type=content_type,
+            content_for_tagging=text,
+            selected_tags=[],
+        )
+
+    def resolve_again_snapshot(replied: Message) -> tuple[RepublishSnapshot, bool]:
+        """Ищет слепок для /again: индекс, открытый кейс, id в тексте или сам пост.
+
+        Второй элемент — True, если нашли полный слепок (альбом/мультипост),
+        False если восстановили только одно ответное сообщение.
+        """
+        snapshot = case_store.find_snapshot_by_admin_message(replied.message_id)
+        if snapshot and snapshot.admin_content_message_ids:
+            return snapshot, True
+
+        live = case_store.find_case_by_admin_message(replied.message_id)
+        if live and live.admin_content_message_ids:
+            return snapshot_from_live_case(live), True
+
+        note_text = replied.text or ""
+        match = CASE_ID_RE.search(note_text)
+        if match:
+            case_id = match.group(1)
+            snapshot = case_store.get_snapshot(case_id)
+            if snapshot and snapshot.admin_content_message_ids:
+                return snapshot, True
+            live = case_store.get_case(case_id)
+            if live and live.admin_content_message_ids:
+                return snapshot_from_live_case(live), True
+
+        return snapshot_from_reply(replied), False
+
+    async def prepare_case_again(message: Message) -> None:
+        """Собирает новый открытый кейс из поста, на который ответили /again."""
+        replied = message.reply_to_message
+        if replied is None:
+            await message.answer(
+                "Ответьте командой /again на пост, который нужно подготовить снова."
+            )
+            return
+
+        snapshot, complete = resolve_again_snapshot(replied)
+        source_ids = snapshot.admin_content_message_ids or [replied.message_id]
+        copied_ids: list[int] = []
+        copied_type = snapshot.single_content_type
+        copied_text = snapshot.single_content_text
+        try:
+            if len(source_ids) == 1:
+                copied = await media_bridge.copy_single(
+                    bot=message.bot,
+                    from_chat_id=settings.admin_chat_id,
+                    to_chat_id=settings.admin_chat_id,
+                    message_id=source_ids[0],
+                )
+                copied_ids = [copied.message_id]
+                copied_type = resolve_content_type(copied)
+                copied_text = extract_message_text(copied) or copied_text
+            else:
+                copied_ids = await media_bridge.copy_many(
+                    bot=message.bot,
+                    from_chat_id=settings.admin_chat_id,
+                    to_chat_id=settings.admin_chat_id,
+                    message_ids=source_ids,
+                )
+        except TelegramBadRequest:
+            copied_ids = []
+
+        if not copied_ids:
+            try:
+                copied = await media_bridge.copy_single(
+                    bot=message.bot,
+                    from_chat_id=settings.admin_chat_id,
+                    to_chat_id=settings.admin_chat_id,
+                    message_id=replied.message_id,
+                )
+                copied_ids = [copied.message_id]
+                complete = False
+                snapshot = snapshot_from_reply(replied)
+                copied_type = resolve_content_type(copied)
+                copied_text = extract_message_text(copied) or snapshot.single_content_text
+            except TelegramBadRequest:
+                await message.answer(
+                    "Не удалось скопировать пост. Сообщения могли быть удалены."
+                )
+                return
+
+        if is_rich_message(replied) or content_rejects_caption(copied_type):
+            copied_type = "rich_message" if is_rich_message(replied) else copied_type
+
+        case_id = uuid4().hex[:8]
+        control = await message.bot.send_message(
+            chat_id=settings.admin_chat_id,
+            text="Повторная подготовка к отправке. Выберите действия с анонимкой",
+            reply_markup=moderation_keyboard(case_id),
+        )
+        case = CaseRecord(
+            case_id=case_id,
+            user_chat_id=None,
+            source_message_ids=list(copied_ids),
+            is_media_group=snapshot.is_media_group and len(copied_ids) > 1,
+            is_composed_multi_post=snapshot.is_composed_multi_post and len(copied_ids) > 1,
+            admin_message_ids=[*copied_ids, control.message_id],
+            admin_content_message_ids=list(copied_ids),
+            control_message_id=control.message_id,
+            content_for_tagging=snapshot.content_for_tagging or copied_text,
+            single_content_text=copied_text,
+            single_content_type=copied_type,
+            selected_tags=normalize_tags(snapshot.selected_tags),
+        )
+        case_store.add_case(case)
+        extra = ""
+        if not complete:
+            extra = (
+                "\nЕсли это был альбом или тейк из нескольких сообщений, "
+                "ответьте /again на служебное сообщение кейса — иначе уйдёт только этот пост."
+            )
+        await message.answer(
+            f"Кейс `{case.case_id}` снова подготовлен к отправке.{extra}",
+            parse_mode="Markdown",
+        )
+
+    @router.message(F.chat.id == settings.admin_chat_id, Command("again"))
+    async def on_again_command(message: Message) -> None:
+        """Повторно готовит пост к публикации по reply /again."""
+        if not message.from_user or message.from_user.is_bot:
+            return
+        if not is_allowed_moderator(message.from_user.id):
+            return
+        await prepare_case_again(message)
 
     @router.callback_query(F.data.startswith("act:"))
     async def on_action(query: CallbackQuery) -> None:
@@ -502,6 +712,7 @@ def create_admin_router(
 
             case.is_waiting_tag_edit = False
             await send_tag_preview(query.bot, case)
+            case_store.persist_case(case)
             if scored:
                 score_map = {item.tag.lower(): item.score for item in scored}
                 score_lines = "\n".join(
@@ -848,6 +1059,7 @@ def create_admin_router(
             return
 
         await send_tag_preview(query.bot, case)
+        case_store.persist_case(case)
         await query.answer("Теги сохранены.")
 
     @router.callback_query(F.data.startswith("edit_cancel:"))
