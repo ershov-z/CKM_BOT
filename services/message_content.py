@@ -39,12 +39,39 @@ def get_message_field(message: Message, name: str) -> Any:
     value = getattr(message, name, None)
     if value is not None:
         return value
-    return _model_extra(message).get(name)
+    extra = _model_extra(message)
+    if name in extra:
+        return extra[name]
+    dump = getattr(message, "model_dump", None)
+    if callable(dump):
+        try:
+            data = message.model_dump()
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get(name) is not None:
+            return data[name]
+    return None
 
 
 def is_rich_message(message: Message) -> bool:
     """True, если это rich-пост (текст с медиа внутри одного сообщения)."""
     return get_message_field(message, "rich_message") is not None
+
+
+def has_embedded_media(message: Message) -> bool:
+    """Альбомы/фото внутри одного текстового поста, не обычная подпись к фото."""
+    if is_rich_message(message):
+        return True
+    has_text = bool(message.text)
+    has_media = bool(
+        message.photo
+        or message.video
+        or message.document
+        or message.animation
+        or message.audio
+        or get_message_field(message, "live_photo")
+    )
+    return has_text and has_media
 
 
 def _collect_strings(payload: Any, chunks: list[str]) -> None:
@@ -89,7 +116,7 @@ def extract_message_text(message: Message) -> str:
 
 def resolve_content_type(message: Message) -> str:
     """content_type с отдельной меткой для rich-постов."""
-    if is_rich_message(message):
+    if has_embedded_media(message):
         return "rich_message"
     return str(message.content_type)
 
