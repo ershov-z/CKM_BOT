@@ -37,6 +37,7 @@ from services.case_store import CaseRecord, CaseStore, RepublishSnapshot
 from services.media_bridge import MediaBridge
 from services.message_content import (
     content_rejects_caption,
+    extract_media_item,
     extract_message_text,
     is_rich_message,
     resolve_content_type,
@@ -309,16 +310,37 @@ def create_admin_router(
             return
         if case.is_media_group and not case.is_composed_multi_post:
             # Media group публикуем без маркеров multi: как один "обычный" кейс.
-            # Альбом всегда копируем целиком. Нельзя copy_message(первое) + copy_many(остальные):
-            # Telegram тогда отклеивает первую картинку от группы.
+            # Основной путь — send_media_group с готовой подписью. copy_messages
+            # не умеет задать caption, а copy_message(первое) + copy_many(остальные)
+            # отклеивает первую картинку от группы.
+            async def try_send_stored_album(
+                caption: str | None = None,
+                caption_entities: list[MessageEntity] | None = None,
+            ) -> bool:
+                if len(case.media_items) <= 1:
+                    return False
+                try:
+                    sent_ids = await media_bridge.send_album(
+                        bot=bot,
+                        chat_id=settings.publish_channel_id,
+                        items=case.media_items,
+                        caption=caption,
+                        caption_entities=caption_entities,
+                    )
+                except TelegramBadRequest:
+                    return False
+                return bool(sent_ids)
+
             if len(base_text) > CAPTION_LIMIT:
-                await media_bridge.copy_many(
-                    bot=bot,
-                    from_chat_id=source_chat_id,
-                    to_chat_id=settings.publish_channel_id,
-                    message_ids=source_message_ids,
-                    remove_caption=True,
-                )
+                sent = await try_send_stored_album()
+                if not sent:
+                    await media_bridge.copy_many(
+                        bot=bot,
+                        from_chat_id=source_chat_id,
+                        to_chat_id=settings.publish_channel_id,
+                        message_ids=source_message_ids,
+                        remove_caption=True,
+                    )
                 await send_text_followup_after_album(
                     base_text=base_text,
                     composed=composed,
@@ -328,14 +350,18 @@ def create_admin_router(
                 return
 
             if len(composed) <= CAPTION_LIMIT:
+                if await try_send_stored_album(
+                    caption=composed,
+                    caption_entities=entities,
+                ):
+                    return
+                # Старый кейс без file_id: копируем альбом и дописываем теги edit'ом.
                 copied_ids = await media_bridge.copy_many(
                     bot=bot,
                     from_chat_id=source_chat_id,
                     to_chat_id=settings.publish_channel_id,
                     message_ids=source_message_ids,
                 )
-                # Альбом уже скопирован как единая группа; теперь обновляем caption
-                # первого элемента, чтобы добавить теги, не ломая grouping.
                 if copied_ids:
                     try:
                         await bot.edit_message_caption(
@@ -345,20 +371,23 @@ def create_admin_router(
                             caption_entities=entities,
                         )
                     except TelegramBadRequest:
-                        # Если edit caption недоступен для конкретного медиа-типа,
-                        # не рвем альбом: публикуем подпись и теги отдельным сообщением.
                         await send_sent_via_then_tags(tags or None)
                 else:
                     await send_sent_via_then_tags(tags or None)
                 return
 
             # Исходный caption влезает, а с подписью/тегами уже нет: досылаем отдельно.
-            await media_bridge.copy_many(
-                bot=bot,
-                from_chat_id=source_chat_id,
-                to_chat_id=settings.publish_channel_id,
-                message_ids=source_message_ids,
+            sent = await try_send_stored_album(
+                caption=base_text or None,
+                caption_entities=entities,
             )
+            if not sent:
+                await media_bridge.copy_many(
+                    bot=bot,
+                    from_chat_id=source_chat_id,
+                    to_chat_id=settings.publish_channel_id,
+                    message_ids=source_message_ids,
+                )
             await send_sent_via_then_tags(tags or None)
             return
 
@@ -520,11 +549,13 @@ def create_admin_router(
             single_content_type=case.single_content_type,
             content_for_tagging=case.content_for_tagging,
             selected_tags=list(case.selected_tags),
+            media_items=list(case.media_items),
         )
 
     def snapshot_from_reply(replied: Message) -> RepublishSnapshot:
         text = extract_message_text(replied)
         content_type = resolve_content_type(replied)
+        media_item = extract_media_item(replied)
         return RepublishSnapshot(
             case_id="",
             admin_content_message_ids=[replied.message_id],
@@ -534,6 +565,7 @@ def create_admin_router(
             single_content_type=content_type,
             content_for_tagging=text,
             selected_tags=[],
+            media_items=[media_item] if media_item else [],
         )
 
     def resolve_again_snapshot(replied: Message) -> tuple[RepublishSnapshot, bool]:
@@ -627,6 +659,7 @@ def create_admin_router(
             single_content_text=copied_text,
             single_content_type=copied_type,
             selected_tags=normalize_tags(snapshot.selected_tags),
+            media_items=list(snapshot.media_items),
         )
         case_store.add_case(case)
         extra = ""

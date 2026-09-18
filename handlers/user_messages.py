@@ -23,7 +23,13 @@ from handlers.ui import moderation_keyboard
 from services.ban_store import BanStore
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
-from services.message_content import extract_message_text, resolve_content_type
+from services.message_content import (
+    extract_media_item,
+    extract_media_items,
+    extract_message_text,
+    replace_media_item_for_message,
+    resolve_content_type,
+)
 
 CAPTION_LIMIT = 1024
 
@@ -109,6 +115,7 @@ def create_user_router(
         single_content_text = extract_message_text(first)
         single_content_entities = list(first.entities or first.caption_entities or [])
         single_content_type = resolve_content_type(first)
+        media_items = extract_media_items(messages)
 
         # Отправляем кейсы в админку последовательно, чтобы не ломать порядок сообщений.
         async with case_send_lock:
@@ -172,6 +179,7 @@ def create_user_router(
                             single_content_text=single_content_text,
                             single_content_entities=single_content_entities,
                             single_content_type=single_content_type,
+                            media_items=media_items,
                         )
                     )
                 else:
@@ -203,6 +211,7 @@ def create_user_router(
                             single_content_text=single_content_text,
                             single_content_entities=single_content_entities,
                             single_content_type=single_content_type,
+                            media_items=media_items,
                         )
                     )
             # Кейс из нескольких сообщений.
@@ -258,6 +267,7 @@ def create_user_router(
                             single_content_text=single_content_text,
                             single_content_entities=single_content_entities,
                             single_content_type=single_content_type,
+                            media_items=media_items,
                         )
                     )
                 else:
@@ -303,6 +313,7 @@ def create_user_router(
                             single_content_text=single_content_text,
                             single_content_entities=single_content_entities,
                             single_content_type=single_content_type,
+                            media_items=media_items,
                         )
                     )
 
@@ -402,6 +413,22 @@ def create_user_router(
         if not case:
             return
 
+        edited_text = extract_message_text(message)
+        edited_entities = list(message.entities or message.caption_entities or [])
+        case.single_content_text = edited_text
+        case.single_content_entities = edited_entities
+        if edited_text:
+            case.content_for_tagging = edited_text
+        case.single_content_type = resolve_content_type(message) or case.single_content_type
+        replacement = extract_media_item(message)
+        if replacement and case.media_items:
+            case.media_items = replace_media_item_for_message(
+                case.media_items,
+                case.source_message_ids,
+                message.message_id,
+                replacement,
+            )
+
         await message.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=(
@@ -411,11 +438,35 @@ def create_user_router(
             parse_mode="Markdown",
         )
 
-        edited_text = (message.text or message.caption or "").strip()
-        edited_entities = list(message.entities or message.caption_entities or [])
-        # Важный fallback: длинная подпись медиа может не пройти через copy_message.
-        if message.content_type != "text" and len(edited_text) > CAPTION_LIMIT:
-            await media_bridge.copy_single(
+        # Telegram присылает edited_message только на один элемент альбома
+        # (обычно тот, у которого подпись). Если копировать только его,
+        # в админке останется одна картинка вместо всей группы.
+        source_ids = case.source_message_ids
+        caption_too_long = (
+            message.content_type != "text" and len(edited_text) > CAPTION_LIMIT
+        )
+
+        if len(source_ids) > 1:
+            copied_ids = await media_bridge.copy_many(
+                bot=message.bot,
+                from_chat_id=message.chat.id,
+                to_chat_id=settings.admin_chat_id,
+                message_ids=source_ids,
+                remove_caption=caption_too_long,
+            )
+            if caption_too_long:
+                await message.bot.send_message(
+                    chat_id=settings.admin_chat_id,
+                    text=edited_text,
+                    entities=edited_entities or None,
+                )
+            if copied_ids:
+                case.admin_content_message_ids = list(copied_ids)
+            case_store.persist_case(case)
+            return
+
+        if caption_too_long:
+            copied = await media_bridge.copy_single(
                 bot=message.bot,
                 from_chat_id=message.chat.id,
                 to_chat_id=settings.admin_chat_id,
@@ -427,13 +478,17 @@ def create_user_router(
                 text=edited_text,
                 entities=edited_entities or None,
             )
+            case.admin_content_message_ids = [copied.message_id]
+            case_store.persist_case(case)
             return
 
-        await media_bridge.copy_single(
+        copied = await media_bridge.copy_single(
             bot=message.bot,
             from_chat_id=message.chat.id,
             to_chat_id=settings.admin_chat_id,
             message_id=message.message_id,
         )
+        case.admin_content_message_ids = [copied.message_id]
+        case_store.persist_case(case)
 
     return router

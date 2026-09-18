@@ -7,9 +7,18 @@ rich_message: старый aiogram может не знать это поле, �
 сообщению Telegram не применяет.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 from aiogram.types import Message
+
+
+@dataclass(slots=True)
+class MediaItem:
+    """Один кадр альбома: тип и file_id для send_media_group."""
+
+    kind: str
+    file_id: str
 
 # Типы, у которых нет обычной подписи: copy_message(caption=...) её молча игнорирует.
 NON_CAPTION_CONTENT_TYPES = {
@@ -124,3 +133,46 @@ def resolve_content_type(message: Message) -> str:
 def content_rejects_caption(content_type: str) -> bool:
     """True, если к сообщению нельзя надежно дописать caption с тегами."""
     return content_type in NON_CAPTION_CONTENT_TYPES
+
+
+def extract_media_item(message: Message) -> MediaItem | None:
+    """Достаёт file_id медиа из сообщения, если это кадр для альбома."""
+    if message.photo:
+        return MediaItem(kind="photo", file_id=message.photo[-1].file_id)
+    if message.video:
+        return MediaItem(kind="video", file_id=message.video.file_id)
+    if message.animation:
+        return MediaItem(kind="animation", file_id=message.animation.file_id)
+    if message.document:
+        return MediaItem(kind="document", file_id=message.document.file_id)
+    if message.audio:
+        return MediaItem(kind="audio", file_id=message.audio.file_id)
+    return None
+
+
+def extract_media_items(messages: list[Message]) -> list[MediaItem]:
+    """Собирает дескрипторы медиа из пачки сообщений, пропуская текст."""
+    items: list[MediaItem] = []
+    for message in messages:
+        item = extract_media_item(message)
+        if item:
+            items.append(item)
+    return items
+
+
+def replace_media_item_for_message(
+    items: list[MediaItem],
+    source_message_ids: list[int],
+    message_id: int,
+    replacement: MediaItem,
+) -> list[MediaItem]:
+    """Обновляет file_id кадра, который пользователь отредактировал."""
+    try:
+        index = source_message_ids.index(message_id)
+    except ValueError:
+        return items
+    if index >= len(items):
+        return items
+    updated = list(items)
+    updated[index] = replacement
+    return updated

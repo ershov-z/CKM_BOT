@@ -8,7 +8,26 @@ from __future__ import annotations
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup, Message, MessageEntity
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InputMediaAnimation,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Message,
+    MessageEntity,
+)
+
+from services.message_content import MediaItem
+
+_INPUT_BY_KIND = {
+    "photo": InputMediaPhoto,
+    "video": InputMediaVideo,
+    "document": InputMediaDocument,
+    "animation": InputMediaAnimation,
+    "audio": InputMediaAudio,
+}
 
 
 class MediaBridge:
@@ -101,3 +120,43 @@ class MediaBridge:
                     )
                 copied_ids.append(message.message_id)
             return copied_ids
+
+    async def send_album(
+        self,
+        bot: Bot,
+        chat_id: int,
+        items: list[MediaItem],
+        caption: str | None = None,
+        caption_entities: list[MessageEntity] | None = None,
+    ) -> list[int]:
+        """Публикует альбом одним send_media_group с подписью на первом кадре.
+
+        copy_messages не умеет задать свою подпись, поэтому теги раньше
+        дописывали вторым запросом edit_message_caption. Здесь caption
+        сразу едет вместе со всеми кадрами.
+        """
+        media: list[
+            InputMediaPhoto
+            | InputMediaVideo
+            | InputMediaDocument
+            | InputMediaAnimation
+            | InputMediaAudio
+        ] = []
+        for item in items:
+            media_cls = _INPUT_BY_KIND.get(item.kind)
+            if media_cls is None:
+                continue
+            if not media and caption:
+                media.append(
+                    media_cls(
+                        media=item.file_id,
+                        caption=caption,
+                        caption_entities=caption_entities,
+                    )
+                )
+            else:
+                media.append(media_cls(media=item.file_id))
+        if len(media) < 2:
+            return []
+        result = await bot.send_media_group(chat_id=chat_id, media=media)
+        return [msg.message_id for msg in result]

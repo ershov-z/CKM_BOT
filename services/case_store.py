@@ -11,6 +11,8 @@ from pathlib import Path
 
 from aiogram.types import MessageEntity
 
+from services.message_content import MediaItem
+
 
 @dataclass(slots=True)
 class CaseRecord:
@@ -26,6 +28,8 @@ class CaseRecord:
     is_media_group: bool
     # True, если кейс должен публиковаться как "тейк из нескольких постов" с маркерами.
     is_composed_multi_post: bool = False
+    # Кадры альбома (kind + file_id) для публикации одним send_media_group.
+    media_items: list[MediaItem] = field(default_factory=list)
     # ID сообщений, отправленных ботом в админ-чат по этому кейсу.
     admin_message_ids: list[int] = field(default_factory=list)
     # Только контентные сообщения кейса в админ-чате (без служебных маркеров/кнопок).
@@ -64,6 +68,25 @@ class RepublishSnapshot:
     single_content_type: str
     content_for_tagging: str
     selected_tags: list[str]
+    media_items: list[MediaItem] = field(default_factory=list)
+
+
+def _serialize_media_items(items: list[MediaItem]) -> list[dict[str, str]]:
+    return [{"kind": item.kind, "file_id": item.file_id} for item in items]
+
+
+def _deserialize_media_items(payload: object) -> list[MediaItem]:
+    if not isinstance(payload, list):
+        return []
+    items: list[MediaItem] = []
+    for raw in payload:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind", "")).strip()
+        file_id = str(raw.get("file_id", "")).strip()
+        if kind and file_id:
+            items.append(MediaItem(kind=kind, file_id=file_id))
+    return items
 
 
 class CaseStore:
@@ -105,6 +128,7 @@ class CaseStore:
             "selected_tags": case.selected_tags,
             "is_waiting_tag_edit": case.is_waiting_tag_edit,
             "status": case.status,
+            "media_items": _serialize_media_items(case.media_items),
         }
 
     def _deserialize_case(self, payload: dict) -> CaseRecord | None:
@@ -139,6 +163,7 @@ class CaseStore:
                 selected_tags=[str(item) for item in payload.get("selected_tags", [])],
                 is_waiting_tag_edit=bool(payload.get("is_waiting_tag_edit", False)),
                 status=str(payload.get("status", "open")),
+                media_items=_deserialize_media_items(payload.get("media_items")),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -263,6 +288,7 @@ class CaseStore:
             single_content_type=case.single_content_type,
             content_for_tagging=case.content_for_tagging,
             selected_tags=list(case.selected_tags),
+            media_items=list(case.media_items),
         )
 
     def _serialize_snapshot(self, snapshot: RepublishSnapshot) -> dict:
@@ -275,6 +301,7 @@ class CaseStore:
             "single_content_type": snapshot.single_content_type,
             "content_for_tagging": snapshot.content_for_tagging,
             "selected_tags": snapshot.selected_tags,
+            "media_items": _serialize_media_items(snapshot.media_items),
         }
 
     def _deserialize_snapshot(self, payload: dict) -> RepublishSnapshot | None:
@@ -290,6 +317,7 @@ class CaseStore:
                 single_content_type=str(payload.get("single_content_type", "")),
                 content_for_tagging=str(payload.get("content_for_tagging", "")),
                 selected_tags=[str(item) for item in payload.get("selected_tags", [])],
+                media_items=_deserialize_media_items(payload.get("media_items")),
             )
         except (KeyError, TypeError, ValueError):
             return None
