@@ -44,6 +44,8 @@ from services.message_content import (
     resolve_content_type,
 )
 from services.publish_content import (
+    DEFAULT_CONTROL_TEXT,
+    PREVIEW_HEADER,
     SENT_VIA,
     compose_single_text_with_tags,
     message_has_sent_via,
@@ -111,19 +113,6 @@ def create_admin_router(
         found = re.findall(r"#[-\wа-яА-ЯёЁ]+", text)
         return normalize_tags(found)
 
-    def build_tag_preview_text(case: CaseRecord) -> str:
-        """Формирует текст предпросмотра публикации (для рабочей карточки кейса)."""
-        base = (case.content_for_tagging or case.single_content_text or "").strip()
-        tags = tags_block(case) or "(теги не выбраны)"
-        if base:
-            body = f"{base}\n\n{tags}"
-        else:
-            body = tags
-        return (
-            "Предпросмотр публикации\n\n"
-            f"{body}"
-        )
-
     def build_multi_start_text(case: CaseRecord) -> str:
         """Служебная строка 'Начало тейка...' для кейсов из нескольких сообщений."""
         posts_count = len(case.source_message_ids)
@@ -137,43 +126,87 @@ def create_admin_router(
         """Типы, где безопаснее отправлять теги отдельным сообщением (без подписи)."""
         return case.single_content_type in {"audio", "voice", "video_note"}
 
-    async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
-        """Обновляет ОДНО рабочее сообщение-карточку предпросмотра для кейса."""
-        preview_text = build_tag_preview_text(case)
-        entities: list[MessageEntity] | None = None
-        if case.single_content_type == "text" and case.single_content_entities:
-            entities = case.single_content_entities
+    async def delete_preview_replicas(bot: Bot, case: CaseRecord) -> None:
+        """Убирает предыдущую копию канала из админ-чата."""
+        for message_id in list(case.preview_message_ids):
+            try:
+                await bot.delete_message(
+                    chat_id=settings.admin_chat_id,
+                    message_id=message_id,
+                )
+            except TelegramBadRequest:
+                continue
+        case.preview_message_ids = []
 
+    async def restore_case_control(bot: Bot, case: CaseRecord) -> None:
+        """Возвращает карточку кейса к исходным кнопкам модерации."""
+        await delete_preview_replicas(bot, case)
         if case.control_message_id is None:
-            created = await bot.send_message(
-                chat_id=settings.admin_chat_id,
-                text=preview_text,
-                entities=entities,
-                reply_markup=tagged_preview_keyboard(case.case_id),
-            )
-            case.control_message_id = created.message_id
-            case_store.index_case(case)
             return
-
+        restore_text = case.control_text_backup or DEFAULT_CONTROL_TEXT
+        restore_entities = case.control_entities_backup or None
         try:
-            # Базовый путь: редактируем текст и кнопки уже существующего сообщения.
             await bot.edit_message_text(
                 chat_id=settings.admin_chat_id,
                 message_id=case.control_message_id,
-                text=preview_text,
-                entities=entities,
-                reply_markup=tagged_preview_keyboard(case.case_id),
+                text=restore_text,
+                entities=restore_entities,
+                reply_markup=moderation_keyboard(case.case_id),
             )
         except TelegramBadRequest:
-            # fallback: если текст отредактировать нельзя, хотя бы обновим кнопки.
             await bot.edit_message_reply_markup(
                 chat_id=settings.admin_chat_id,
                 message_id=case.control_message_id,
-                reply_markup=tagged_preview_keyboard(case.case_id),
+                reply_markup=moderation_keyboard(case.case_id),
             )
 
+    def remember_control_backup(case: CaseRecord, message: Message | None) -> None:
+        if case.control_text_backup is not None:
+            return
+        if message is None or not message.text:
+            return
+        if message.text == PREVIEW_HEADER:
+            return
+        case.control_text_backup = message.text
+        case.control_entities_backup = list(message.entities or [])
+
+    async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
+        """Служебный заголовок + точная копия поста, который уйдёт в канал."""
+        await delete_preview_replicas(bot, case)
+        if case.control_message_id is None:
+            created = await bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text=PREVIEW_HEADER,
+                reply_markup=tagged_preview_keyboard(case.case_id),
+            )
+            case.control_message_id = created.message_id
+        else:
+            try:
+                await bot.edit_message_text(
+                    chat_id=settings.admin_chat_id,
+                    message_id=case.control_message_id,
+                    text=PREVIEW_HEADER,
+                    reply_markup=tagged_preview_keyboard(case.case_id),
+                )
+            except TelegramBadRequest:
+                await bot.edit_message_reply_markup(
+                    chat_id=settings.admin_chat_id,
+                    message_id=case.control_message_id,
+                    reply_markup=tagged_preview_keyboard(case.case_id),
+                )
+        case.preview_message_ids = await render_case_to_chat(
+            bot,
+            case,
+            settings.admin_chat_id,
+        )
+        case_store.persist_case(case)
+
     async def publish_case_with_tags(bot: Bot, case: CaseRecord) -> None:
-        """Финальная публикация кейса в канал (с учетом типа контента)."""
+        """Финальная публикация кейса в канал."""
+        await render_case_to_chat(bot, case, settings.publish_channel_id)
+
+    async def render_case_to_chat(bot: Bot, case: CaseRecord, chat_id: int) -> list[int]:
+        """Рисует итоговый пост в указанный чат тем же кодом, что и публикация."""
         # Основной путь: публикация из лички пользователя (когда chat_id еще в памяти).
         # Fallback после рестарта: публикация из копий в админ-чате.
         # За счет fallback админ может завершить публикацию даже после падения бота,
@@ -200,15 +233,29 @@ def create_admin_router(
             case.single_content_entities if case.single_content_entities else None
         )
 
+        posted: list[int] = []
+
+        def note_message(message: Message | None) -> Message | None:
+            if message is not None and message.message_id:
+                posted.append(message.message_id)
+            return message
+
+        def note_ids(message_ids: list[int] | None) -> list[int]:
+            if message_ids:
+                posted.extend(message_ids)
+            return message_ids or []
+
         async def send_sent_via_then_tags(tags_part: str | None = None) -> None:
             """Досылает подпись «Прислано через…» и теги одним сообщением."""
             if tags_part:
-                await bot.send_message(
-                    chat_id=settings.publish_channel_id,
+                sent = await bot.send_message(
+                    chat_id=chat_id,
                     text=f"{SENT_VIA}\n\n{tags_part}",
                 )
+                note_message(sent)
                 return
-            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+            sent = await bot.send_message(chat_id=chat_id, text=SENT_VIA)
+            note_message(sent)
 
         async def copy_single_for_publish(
             caption: str | None = None,
@@ -221,22 +268,26 @@ def create_admin_router(
             """
             if caption is not None:
                 try:
-                    return await bot.copy_message(
-                        chat_id=settings.publish_channel_id,
-                        from_chat_id=source_chat_id,
-                        message_id=source_message_ids[0],
-                        caption=caption,
-                        caption_entities=caption_entities,
+                    return note_message(
+                        await bot.copy_message(
+                            chat_id=chat_id,
+                            from_chat_id=source_chat_id,
+                            message_id=source_message_ids[0],
+                            caption=caption,
+                            caption_entities=caption_entities,
+                        )
                     )
                 except TelegramBadRequest:
                     pass
                 except Exception:
                     return None
             try:
-                return await bot.copy_message(
-                    chat_id=settings.publish_channel_id,
-                    from_chat_id=source_chat_id,
-                    message_id=source_message_ids[0],
+                return note_message(
+                    await bot.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=source_chat_id,
+                        message_id=source_message_ids[0],
+                    )
                 )
             except Exception:
                 return None
@@ -251,45 +302,53 @@ def create_admin_router(
             await send_sent_via_then_tags(tags_part)
 
         if case.is_media_group and case.is_composed_multi_post:
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=build_multi_start_text(case),
+            note_message(
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=build_multi_start_text(case),
+                )
             )
             try:
-                await media_bridge.copy_many(
-                    bot=bot,
-                    from_chat_id=source_chat_id,
-                    to_chat_id=settings.publish_channel_id,
-                    message_ids=source_message_ids,
+                note_ids(
+                    await media_bridge.copy_many(
+                        bot=bot,
+                        from_chat_id=source_chat_id,
+                        to_chat_id=chat_id,
+                        message_ids=source_message_ids,
+                    )
                 )
             except Exception:
                 pass
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=f"Конец тейка из нескольких постов ({len(source_message_ids)}) ↑",
+            note_message(
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Конец тейка из нескольких постов ({len(source_message_ids)}) ↑",
+                )
             )
             await send_sent_via_then_tags(tags or None)
-            return
+            return posted
         if case.is_media_group and not case.is_composed_multi_post:
-            await publish_plain_album(
-                bot,
-                media_bridge,
-                channel_id=settings.publish_channel_id,
-                source_chat_id=source_chat_id,
-                source_message_ids=source_message_ids,
-                media_items=case.media_items,
-                base_text=base_text,
-                composed=composed,
-                tags=tags,
+            note_ids(
+                await publish_plain_album(
+                    bot,
+                    media_bridge,
+                    channel_id=chat_id,
+                    source_chat_id=source_chat_id,
+                    source_message_ids=source_message_ids,
+                    media_items=case.media_items,
+                    base_text=base_text,
+                    composed=composed,
+                    tags=tags,
+                )
             )
-            return
+            return posted
 
         if content_rejects_caption(case.single_content_type):
             # Rich-посты с картинками внутри текста и прочие типы без caption:
             # copy_message(caption=...) либо падает, либо копирует оригинал без хвоста.
             copied = await copy_single_for_publish()
             await ensure_footer_after_copy(copied, tags or None)
-            return
+            return posted
 
         if case.single_content_type == "text":
             if case.user_chat_id is None:
@@ -297,15 +356,17 @@ def create_admin_router(
                 # с альбомами внутри текста. send_message оставил бы только текст.
                 copied = await copy_single_for_publish()
                 await ensure_footer_after_copy(copied, tags or None)
-                return
-            await send_text_with_composed(
-                bot,
-                channel_id=settings.publish_channel_id,
-                composed=composed,
-                tags=tags,
-                entities=entities,
+                return posted
+            note_ids(
+                await send_text_with_composed(
+                    bot,
+                    channel_id=chat_id,
+                    composed=composed,
+                    tags=tags,
+                    entities=entities,
+                )
             )
-            return
+            return posted
 
         async def send_single_media_with_split_parts(
             media_caption: str | None = None,
@@ -323,10 +384,12 @@ def create_admin_router(
                 caption_entities=media_caption_entities,
             )
             if text_part:
-                await bot.send_message(
-                    chat_id=settings.publish_channel_id,
-                    text=text_part,
-                    entities=entities if text_part == base_text else None,
+                note_message(
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text_part,
+                        entities=entities if text_part == base_text else None,
+                    )
                 )
             await send_sent_via_then_tags(tags_part)
 
@@ -337,43 +400,53 @@ def create_admin_router(
                 posts_count += 1
             if tags:
                 posts_count += 1
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+            note_message(
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
+                )
             )
-            await bot.copy_message(
-                chat_id=settings.publish_channel_id,
-                from_chat_id=source_chat_id,
-                message_id=source_message_ids[0],
+            note_message(
+                await bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=source_chat_id,
+                    message_id=source_message_ids[0],
+                )
             )
             if base_text:
-                await bot.send_message(
-                    chat_id=settings.publish_channel_id,
-                    text=base_text,
-                    entities=entities,
+                note_message(
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=base_text,
+                        entities=entities,
+                    )
                 )
             if tags:
-                await bot.send_message(chat_id=settings.publish_channel_id, text=tags)
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+                note_message(await bot.send_message(chat_id=chat_id, text=tags))
+            note_message(
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Конец тейка из нескольких постов ({posts_count}) ↑",
+                )
             )
-            await bot.send_message(chat_id=settings.publish_channel_id, text=SENT_VIA)
+            note_message(await bot.send_message(chat_id=chat_id, text=SENT_VIA))
 
         if media_requires_separate_tags(case):
-            await bot.copy_message(
-                chat_id=settings.publish_channel_id,
-                from_chat_id=source_chat_id,
-                message_id=source_message_ids[0],
+            note_message(
+                await bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=source_chat_id,
+                    message_id=source_message_ids[0],
+                )
             )
             await send_sent_via_then_tags(tags or None)
-            return
+            return posted
 
         # Premium-кейс: исходный пользовательский текст уже длиннее лимита caption.
         # Это считается составным постом, поэтому публикуем как multi-тейк с маркерами.
         if len(base_text) > CAPTION_LIMIT:
             await send_single_media_as_multi_take_for_long_base()
-            return
+            return posted
 
         # Если исходная подпись помещалась, но после добавления «Прислано…»/тегов
         # стала слишком длинной: сохраняем исходный caption, остальное — отдельно.
@@ -383,16 +456,19 @@ def create_admin_router(
                 media_caption_entities=entities,
                 tags_part=tags or None,
             )
-            return
+            return posted
 
-        await copy_single_with_composed(
-            bot,
-            channel_id=settings.publish_channel_id,
-            from_chat_id=source_chat_id,
-            message_id=source_message_ids[0],
-            composed=composed,
-            tags=tags,
+        note_ids(
+            await copy_single_with_composed(
+                bot,
+                channel_id=chat_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_ids[0],
+                composed=composed,
+                tags=tags,
+            )
         )
+        return posted
 
     async def notify_user_published(bot: Bot, case: CaseRecord) -> None:
         """Уведомляет автора, что его анонимка реально опубликована."""
@@ -643,6 +719,7 @@ def create_admin_router(
                 )
 
             case.is_waiting_tag_edit = False
+            remember_control_backup(case, query.message)
             await send_tag_preview(query.bot, case)
             case_store.persist_case(case)
             if scored:
@@ -790,12 +867,8 @@ def create_admin_router(
         if not case or case.status != "open":
             await query.answer("Кейс уже обработан или не найден.", show_alert=True)
             return
-        if case.control_message_id is not None:
-            await query.bot.edit_message_reply_markup(
-                chat_id=settings.admin_chat_id,
-                message_id=case.control_message_id,
-                reply_markup=moderation_keyboard(case.case_id),
-            )
+        await restore_case_control(query.bot, case)
+        case_store.persist_case(case)
         await query.answer("Возврат к действиям кейса.")
 
     @router.callback_query(F.data.startswith("pub_cancel:"))
@@ -1410,6 +1483,7 @@ def create_admin_router(
             case.selected_tags = parsed_tags
             case.is_waiting_tag_edit = False
             case_store.pop_pending_tag_edit(message.from_user.id)
+            remember_control_backup(case, message.reply_to_message)
             await send_tag_preview(message.bot, case)
             await message.answer("Теги обновлены.")
             return

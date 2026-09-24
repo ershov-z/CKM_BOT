@@ -172,6 +172,25 @@ class CaseStoreMediaTests(unittest.TestCase):
             )
             self.assertIsNone(case.user_chat_id)
 
+    def test_preview_message_ids_survive_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "open_cases.json"
+            store = CaseStore(path)
+            store.add_case(
+                CaseRecord(
+                    case_id="cc22dd33",
+                    user_chat_id=7,
+                    source_message_ids=[1],
+                    is_media_group=False,
+                    preview_message_ids=[88, 89],
+                )
+            )
+            reloaded = CaseStore(path)
+            case = reloaded.get_case("cc22dd33")
+            self.assertIsNotNone(case)
+            assert case is not None
+            self.assertEqual(case.preview_message_ids, [88, 89])
+
     def test_legacy_payload_without_media_items_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "open_cases.json"

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from services.case_store import CaseRecord
 from services.publish_content import (
+    PREVIEW_HEADER,
     SENT_VIA,
     compose_single_text_with_tags,
     message_has_sent_via,
@@ -35,6 +36,11 @@ class PublishContentTests(unittest.TestCase):
             text,
             f"Мастерская\n\n{SENT_VIA}\n\n#костюмы\n#фест",
         )
+
+    def test_preview_header_is_not_part_of_channel_text(self) -> None:
+        text = compose_single_text_with_tags(_case())
+        self.assertNotIn(PREVIEW_HEADER, text)
+        self.assertIn(SENT_VIA, text)
 
     def test_compose_without_base_still_has_footer(self) -> None:
         text = compose_single_text_with_tags(

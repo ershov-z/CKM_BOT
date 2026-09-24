@@ -36,6 +36,8 @@ class CaseRecord:
     admin_content_message_ids: list[int] = field(default_factory=list)
     # ID основного служебного сообщения с кнопками.
     control_message_id: int | None = None
+    # Копия будущего канала в админ-чате (предпросмотр), без заголовка.
+    preview_message_ids: list[int] = field(default_factory=list)
     # Текстовая “выжимка” для тегирования через LLM.
     content_for_tagging: str = ""
     # Оригинальный текст/подпись одиночного сообщения (для корректной публикации).
@@ -122,6 +124,7 @@ class CaseStore:
             "admin_message_ids": case.admin_message_ids,
             "admin_content_message_ids": case.admin_content_message_ids,
             "control_message_id": case.control_message_id,
+            "preview_message_ids": case.preview_message_ids,
             "content_for_tagging": case.content_for_tagging,
             "single_content_text": case.single_content_text,
             "single_content_type": case.single_content_type,
@@ -156,6 +159,9 @@ class CaseStore:
                     if payload.get("control_message_id") is not None
                     else None
                 ),
+                preview_message_ids=[
+                    int(item) for item in payload.get("preview_message_ids", [])
+                ],
                 content_for_tagging=str(payload.get("content_for_tagging", "")),
                 single_content_text=str(payload.get("single_content_text", "")),
                 single_content_entities=[],
@@ -379,6 +385,7 @@ class CaseStore:
         ids = [
             *case.admin_message_ids,
             *case.admin_content_message_ids,
+            *case.preview_message_ids,
         ]
         if case.control_message_id is not None:
             ids.append(case.control_message_id)
@@ -426,5 +433,7 @@ class CaseStore:
             if message_id in case.admin_content_message_ids:
                 return case
             if case.control_message_id == message_id:
+                return case
+            if message_id in case.preview_message_ids:
                 return case
         return None

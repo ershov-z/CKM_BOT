@@ -14,14 +14,19 @@ CAPTION_LIMIT = 1024
 TEXT_LIMIT = 4096
 
 
-async def _send_footer(bot: Bot, channel_id: int, tags: str) -> None:
+def _message_ids(messages: list[Message]) -> list[int]:
+    return [msg.message_id for msg in messages if msg.message_id]
+
+
+async def _send_footer(bot: Bot, channel_id: int, tags: str) -> list[int]:
     if tags:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=channel_id,
             text=f"{SENT_VIA}\n\n{tags}",
         )
-        return
-    await bot.send_message(chat_id=channel_id, text=SENT_VIA)
+        return [sent.message_id]
+    sent = await bot.send_message(chat_id=channel_id, text=SENT_VIA)
+    return [sent.message_id]
 
 
 async def publish_plain_album(
@@ -37,13 +42,14 @@ async def publish_plain_album(
     tags: str,
     caption_limit: int = CAPTION_LIMIT,
     text_limit: int = TEXT_LIMIT,
-) -> None:
+) -> list[int]:
     """Публикует альбом одним send_media_group и гарантирует футер.
 
     copy_messages не умеет задать свою подпись. copy_message(первое) +
     copy_many(остальные) отклеивает первую картинку. Поэтому основной путь —
     send_album. Если caption не прилип, дописываем edit'ом, а не второй копией.
     """
+    posted: list[int] = []
 
     async def send_stored_album(caption: str | None = None) -> list[Message]:
         if len(media_items) <= 1:
@@ -71,36 +77,43 @@ async def publish_plain_album(
                 return
             except TelegramBadRequest:
                 pass
-        await _send_footer(bot, channel_id, tags)
+        posted.extend(await _send_footer(bot, channel_id, tags))
 
     if len(base_text) > caption_limit:
         sent = await send_stored_album()
+        posted.extend(_message_ids(sent))
         if not sent:
-            await media_bridge.copy_many(
-                bot=bot,
-                from_chat_id=source_chat_id,
-                to_chat_id=channel_id,
-                message_ids=source_message_ids,
-                remove_caption=True,
+            posted.extend(
+                await media_bridge.copy_many(
+                    bot=bot,
+                    from_chat_id=source_chat_id,
+                    to_chat_id=channel_id,
+                    message_ids=source_message_ids,
+                    remove_caption=True,
+                )
             )
-        if len(composed) <= text_limit:
-            await bot.send_message(chat_id=channel_id, text=composed)
-        else:
-            await bot.send_message(chat_id=channel_id, text=base_text)
-            await _send_footer(bot, channel_id, tags)
-        return
+        followup = await bot.send_message(
+            chat_id=channel_id,
+            text=composed if len(composed) <= text_limit else base_text,
+        )
+        posted.append(followup.message_id)
+        if len(composed) > text_limit:
+            posted.extend(await _send_footer(bot, channel_id, tags))
+        return posted
 
     if len(composed) <= caption_limit:
         sent = await send_stored_album(caption=composed)
+        posted.extend(_message_ids(sent))
         if sent:
             await ensure_footer(sent[0])
-            return
+            return posted
         copied_ids = await media_bridge.copy_many(
             bot=bot,
             from_chat_id=source_chat_id,
             to_chat_id=channel_id,
             message_ids=source_message_ids,
         )
+        posted.extend(copied_ids)
         if copied_ids:
             try:
                 await bot.edit_message_caption(
@@ -109,17 +122,21 @@ async def publish_plain_album(
                     caption=composed,
                 )
             except TelegramBadRequest:
-                await _send_footer(bot, channel_id, tags)
+                posted.extend(await _send_footer(bot, channel_id, tags))
         else:
-            await _send_footer(bot, channel_id, tags)
-        return
+            posted.extend(await _send_footer(bot, channel_id, tags))
+        return posted
 
     sent = await send_stored_album(caption=base_text or None)
+    posted.extend(_message_ids(sent))
     if not sent:
-        await media_bridge.copy_many(
-            bot=bot,
-            from_chat_id=source_chat_id,
-            to_chat_id=channel_id,
-            message_ids=source_message_ids,
+        posted.extend(
+            await media_bridge.copy_many(
+                bot=bot,
+                from_chat_id=source_chat_id,
+                to_chat_id=channel_id,
+                message_ids=source_message_ids,
+            )
         )
-    await _send_footer(bot, channel_id, tags)
+    posted.extend(await _send_footer(bot, channel_id, tags))
+    return posted

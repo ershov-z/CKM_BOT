@@ -7,6 +7,8 @@ from aiogram.types import Message, MessageEntity
 from services.case_store import CaseRecord
 
 SENT_VIA = "Прислано через @backstage_staff_bot"
+PREVIEW_HEADER = "Предпросмотр публикации"
+DEFAULT_CONTROL_TEXT = "Выберите действия с анонимкой"
 
 
 def tags_block(case: CaseRecord) -> str:
