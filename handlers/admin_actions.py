@@ -32,6 +32,7 @@ from handlers.ui import (
     unban_confirm_keyboard,
     unban_request_keyboard,
 )
+from services.album_publish import publish_plain_album
 from services.ban_store import BanStore
 from services.case_store import CaseRecord, CaseStore, RepublishSnapshot
 from services.media_bridge import MediaBridge
@@ -42,12 +43,16 @@ from services.message_content import (
     is_rich_message,
     resolve_content_type,
 )
+from services.publish_content import (
+    SENT_VIA,
+    compose_single_text_with_tags,
+    message_has_sent_via,
+    tags_block,
+)
 from services.reject_reasons import format_admin_reject_guide, load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
-TEXT_LIMIT = 4096
-SENT_VIA = "Прислано через @backstage_staff_bot"
 CASE_ID_RE = re.compile(r"Кейс `([0-9a-fA-F]{8})`")
 
 
@@ -105,22 +110,6 @@ def create_admin_router(
         found = re.findall(r"#[-\wа-яА-ЯёЁ]+", text)
         return normalize_tags(found)
 
-    def tags_block(case: CaseRecord) -> str:
-        """Собирает теги в многострочный блок (по одному тегу на строку)."""
-        return "\n".join(case.selected_tags).strip()
-
-    def compose_single_text_with_tags(case: CaseRecord) -> str:
-        """Склеивает текст поста, подпись «Прислано через…» и блок тегов."""
-        base = (case.single_content_text or "").strip()
-        tags = tags_block(case)
-        parts: list[str] = []
-        if base:
-            parts.append(base)
-        parts.append(SENT_VIA)
-        if tags:
-            parts.append(tags)
-        return "\n\n".join(parts)
-
     def build_tag_preview_text(case: CaseRecord) -> str:
         """Формирует текст предпросмотра публикации (для рабочей карточки кейса)."""
         base = (case.content_for_tagging or case.single_content_text or "").strip()
@@ -146,13 +135,6 @@ def create_admin_router(
     def media_requires_separate_tags(case: CaseRecord) -> bool:
         """Типы, где безопаснее отправлять теги отдельным сообщением (без подписи)."""
         return case.single_content_type in {"audio", "voice", "video_note"}
-
-    def message_has_sent_via(message: Message | None) -> bool:
-        """Проверяет, что в скопированном сообщении уже есть служебная подпись."""
-        if message is None:
-            return False
-        blob = "\n".join(part for part in (message.text, message.caption) if part)
-        return SENT_VIA in blob
 
     async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
         """Обновляет ОДНО рабочее сообщение-карточку предпросмотра для кейса."""
@@ -267,27 +249,6 @@ def create_admin_router(
                 return
             await send_sent_via_then_tags(tags_part)
 
-        async def send_text_followup_after_album(
-            base_text: str,
-            composed: str,
-            entities: list[MessageEntity] | None,
-            tags_part: str | None,
-        ) -> None:
-            """После альбома досылает длинный текст постом, не дробя подпись и теги."""
-            if len(composed) <= TEXT_LIMIT:
-                await bot.send_message(
-                    chat_id=settings.publish_channel_id,
-                    text=composed,
-                    entities=entities,
-                )
-                return
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=base_text,
-                entities=entities,
-            )
-            await send_sent_via_then_tags(tags_part)
-
         if case.is_media_group and case.is_composed_multi_post:
             await bot.send_message(
                 chat_id=settings.publish_channel_id,
@@ -309,86 +270,17 @@ def create_admin_router(
             await send_sent_via_then_tags(tags or None)
             return
         if case.is_media_group and not case.is_composed_multi_post:
-            # Media group публикуем без маркеров multi: как один "обычный" кейс.
-            # Основной путь — send_media_group с готовой подписью. copy_messages
-            # не умеет задать caption, а copy_message(первое) + copy_many(остальные)
-            # отклеивает первую картинку от группы.
-            async def try_send_stored_album(
-                caption: str | None = None,
-                caption_entities: list[MessageEntity] | None = None,
-            ) -> bool:
-                if len(case.media_items) <= 1:
-                    return False
-                try:
-                    sent_ids = await media_bridge.send_album(
-                        bot=bot,
-                        chat_id=settings.publish_channel_id,
-                        items=case.media_items,
-                        caption=caption,
-                        caption_entities=caption_entities,
-                    )
-                except TelegramBadRequest:
-                    return False
-                return bool(sent_ids)
-
-            if len(base_text) > CAPTION_LIMIT:
-                sent = await try_send_stored_album()
-                if not sent:
-                    await media_bridge.copy_many(
-                        bot=bot,
-                        from_chat_id=source_chat_id,
-                        to_chat_id=settings.publish_channel_id,
-                        message_ids=source_message_ids,
-                        remove_caption=True,
-                    )
-                await send_text_followup_after_album(
-                    base_text=base_text,
-                    composed=composed,
-                    entities=entities,
-                    tags_part=tags or None,
-                )
-                return
-
-            if len(composed) <= CAPTION_LIMIT:
-                if await try_send_stored_album(
-                    caption=composed,
-                    caption_entities=entities,
-                ):
-                    return
-                # Старый кейс без file_id: копируем альбом и дописываем теги edit'ом.
-                copied_ids = await media_bridge.copy_many(
-                    bot=bot,
-                    from_chat_id=source_chat_id,
-                    to_chat_id=settings.publish_channel_id,
-                    message_ids=source_message_ids,
-                )
-                if copied_ids:
-                    try:
-                        await bot.edit_message_caption(
-                            chat_id=settings.publish_channel_id,
-                            message_id=copied_ids[0],
-                            caption=composed,
-                            caption_entities=entities,
-                        )
-                    except TelegramBadRequest:
-                        await send_sent_via_then_tags(tags or None)
-                else:
-                    await send_sent_via_then_tags(tags or None)
-                return
-
-            # Исходный caption влезает, а с подписью/тегами уже нет: досылаем отдельно.
-            sent = await try_send_stored_album(
-                caption=base_text or None,
-                caption_entities=entities,
+            await publish_plain_album(
+                bot,
+                media_bridge,
+                channel_id=settings.publish_channel_id,
+                source_chat_id=source_chat_id,
+                source_message_ids=source_message_ids,
+                media_items=case.media_items,
+                base_text=base_text,
+                composed=composed,
+                tags=tags,
             )
-            if not sent:
-                await media_bridge.copy_many(
-                    bot=bot,
-                    from_chat_id=source_chat_id,
-                    to_chat_id=settings.publish_channel_id,
-                    message_ids=source_message_ids,
-                )
-            await send_sent_via_then_tags(tags or None)
             return
 
         if content_rejects_caption(case.single_content_type):

@@ -21,6 +21,14 @@ from aiogram.types import (
 
 from services.message_content import MediaItem
 
+AlbumInputMedia = (
+    InputMediaPhoto
+    | InputMediaVideo
+    | InputMediaDocument
+    | InputMediaAnimation
+    | InputMediaAudio
+)
+
 _INPUT_BY_KIND = {
     "photo": InputMediaPhoto,
     "video": InputMediaVideo,
@@ -28,6 +36,30 @@ _INPUT_BY_KIND = {
     "animation": InputMediaAnimation,
     "audio": InputMediaAudio,
 }
+
+
+def build_album_media(
+    items: list[MediaItem],
+    caption: str | None = None,
+    caption_entities: list[MessageEntity] | None = None,
+) -> list[AlbumInputMedia]:
+    """Собирает InputMedia для send_media_group: подпись только на первом кадре."""
+    media: list[AlbumInputMedia] = []
+    for item in items:
+        media_cls = _INPUT_BY_KIND.get(item.kind)
+        if media_cls is None:
+            continue
+        if not media and caption:
+            media.append(
+                media_cls(
+                    media=item.file_id,
+                    caption=caption,
+                    caption_entities=caption_entities,
+                )
+            )
+        else:
+            media.append(media_cls(media=item.file_id))
+    return media
 
 
 class MediaBridge:
@@ -128,35 +160,19 @@ class MediaBridge:
         items: list[MediaItem],
         caption: str | None = None,
         caption_entities: list[MessageEntity] | None = None,
-    ) -> list[int]:
+    ) -> list[Message]:
         """Публикует альбом одним send_media_group с подписью на первом кадре.
 
         copy_messages не умеет задать свою подпись, поэтому теги раньше
         дописывали вторым запросом edit_message_caption. Здесь caption
         сразу едет вместе со всеми кадрами.
         """
-        media: list[
-            InputMediaPhoto
-            | InputMediaVideo
-            | InputMediaDocument
-            | InputMediaAnimation
-            | InputMediaAudio
-        ] = []
-        for item in items:
-            media_cls = _INPUT_BY_KIND.get(item.kind)
-            if media_cls is None:
-                continue
-            if not media and caption:
-                media.append(
-                    media_cls(
-                        media=item.file_id,
-                        caption=caption,
-                        caption_entities=caption_entities,
-                    )
-                )
-            else:
-                media.append(media_cls(media=item.file_id))
+        media = build_album_media(
+            items,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
         if len(media) < 2:
             return []
         result = await bot.send_media_group(chat_id=chat_id, media=media)
-        return [msg.message_id for msg in result]
+        return list(result)
