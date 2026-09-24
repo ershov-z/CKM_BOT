@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Сборка подписи публикации: исходный текст, «Прислано через…», теги."""
 
-from aiogram.types import Message
+from aiogram.types import Message, MessageEntity
 
 from services.case_store import CaseRecord
 
@@ -33,3 +33,28 @@ def message_has_sent_via(message: Message | None) -> bool:
         return False
     blob = "\n".join(part for part in (message.text, message.caption) if part)
     return SENT_VIA in blob
+
+
+def utf16_len(text: str) -> int:
+    """Длина строки в UTF-16 code units, как считает Telegram."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def entities_within_text(
+    text: str,
+    entities: list[MessageEntity] | None,
+) -> list[MessageEntity] | None:
+    """Оставляет только entities, которые целиком лежат внутри text.
+
+    Исходные caption_entities нельзя клеить к composed (текст + футер + теги):
+    Telegram тогда либо рвёт запрос, либо выкладывает пост без новой подписи.
+    """
+    if not entities:
+        return None
+    limit = utf16_len(text)
+    kept = [
+        entity
+        for entity in entities
+        if entity.offset >= 0 and entity.offset + entity.length <= limit
+    ]
+    return kept or None

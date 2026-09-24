@@ -49,6 +49,7 @@ from services.publish_content import (
     message_has_sent_via,
     tags_block,
 )
+from services.single_publish import copy_single_with_composed, send_text_with_composed
 from services.reject_reasons import format_admin_reject_guide, load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
@@ -297,9 +298,11 @@ def create_admin_router(
                 copied = await copy_single_for_publish()
                 await ensure_footer_after_copy(copied, tags or None)
                 return
-            await bot.send_message(
-                chat_id=settings.publish_channel_id,
-                text=composed,
+            await send_text_with_composed(
+                bot,
+                channel_id=settings.publish_channel_id,
+                composed=composed,
+                tags=tags,
                 entities=entities,
             )
             return
@@ -382,11 +385,14 @@ def create_admin_router(
             )
             return
 
-        copied = await copy_single_for_publish(
-            caption=composed,
-            caption_entities=entities,
+        await copy_single_with_composed(
+            bot,
+            channel_id=settings.publish_channel_id,
+            from_chat_id=source_chat_id,
+            message_id=source_message_ids[0],
+            composed=composed,
+            tags=tags,
         )
-        await ensure_footer_after_copy(copied, tags or None)
 
     async def notify_user_published(bot: Bot, case: CaseRecord) -> None:
         """Уведомляет автора, что его анонимка реально опубликована."""
