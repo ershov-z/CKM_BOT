@@ -50,6 +50,8 @@ class CaseRecord:
     selected_tags: list[str] = field(default_factory=list)
     # Флаг, что админ сейчас редактирует теги.
     is_waiting_tag_edit: bool = False
+    # True, если на живом посте сейчас составная подпись (SENT_VIA + теги).
+    is_previewing: bool = False
     # Текст служебного сообщения до экрана выбора причины отклонения.
     control_text_backup: str | None = None
     # Entities того же сообщения, чтобы можно было вернуть предпросмотр без потери разметки.
@@ -130,6 +132,7 @@ class CaseStore:
             "single_content_type": case.single_content_type,
             "selected_tags": case.selected_tags,
             "is_waiting_tag_edit": case.is_waiting_tag_edit,
+            "is_previewing": case.is_previewing,
             "status": case.status,
             "media_items": _serialize_media_items(case.media_items),
         }
@@ -168,6 +171,7 @@ class CaseStore:
                 single_content_type=str(payload.get("single_content_type", "")),
                 selected_tags=[str(item) for item in payload.get("selected_tags", [])],
                 is_waiting_tag_edit=bool(payload.get("is_waiting_tag_edit", False)),
+                is_previewing=bool(payload.get("is_previewing", False)),
                 status=str(payload.get("status", "open")),
                 media_items=_deserialize_media_items(payload.get("media_items")),
             )

@@ -16,11 +16,19 @@ from uuid import uuid4
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from config import Settings
 from handlers.ui import moderation_keyboard
 from services.ban_store import BanStore
+from services.case_card import (
+    edit_case_post_media,
+    preview_post_text,
+    raw_post_text,
+    show_post_preview,
+    show_post_raw,
+)
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
 from services.message_content import (
@@ -222,17 +230,35 @@ def create_user_router(
                     msg.media_group_id == first.media_group_id for msg in messages
                 )
                 if is_album:
-                    # Telegram media group: в админке показываем как один кейс без маркеров multi.
-                    # Длинную подпись снимаем на копировании, иначе copy_messages падает
-                    # и fallback по одному рвёт альбом.
+                    # Тот же визуал, что у превью/канала: send_media_group + control следом.
                     caption_too_long = len(single_content_text) > CAPTION_LIMIT
-                    copied_ids = await media_bridge.copy_many(
-                        bot=first.bot,
-                        from_chat_id=first.chat.id,
-                        to_chat_id=settings.admin_chat_id,
-                        message_ids=source_message_ids,
-                        remove_caption=caption_too_long,
-                    )
+                    album_caption = None if caption_too_long else (single_content_text or None)
+                    sent_album: list[Message] = []
+                    if len(media_items) >= 2:
+                        try:
+                            sent_album = await media_bridge.send_album(
+                                bot=first.bot,
+                                chat_id=settings.admin_chat_id,
+                                items=media_items,
+                                caption=album_caption,
+                                caption_entities=(
+                                    None
+                                    if caption_too_long
+                                    else (single_content_entities or None)
+                                ),
+                            )
+                        except TelegramBadRequest:
+                            sent_album = []
+                    if sent_album:
+                        copied_ids = [msg.message_id for msg in sent_album if msg.message_id]
+                    else:
+                        copied_ids = await media_bridge.copy_many(
+                            bot=first.bot,
+                            from_chat_id=first.chat.id,
+                            to_chat_id=settings.admin_chat_id,
+                            message_ids=source_message_ids,
+                            remove_caption=caption_too_long,
+                        )
                     text_message_id: int | None = None
                     if caption_too_long:
                         text_message = await first.bot.send_message(
@@ -403,7 +429,7 @@ def create_user_router(
 
     @router.edited_message(F.chat.type == ChatType.PRIVATE)
     async def on_user_edited_message(message: Message) -> None:
-        """Если пользователь отредактировал сообщение, шлем новую версию в админку."""
+        """Правит живой пост в админке, без сервисного сообщения и новой копии."""
         if not message.from_user or message.from_user.is_bot:
             return
         case = case_store.find_open_case_by_user_message(
@@ -429,66 +455,69 @@ def create_user_router(
                 replacement,
             )
 
-        await message.bot.send_message(
-            chat_id=settings.admin_chat_id,
-            text=(
-                f"Сервис: пользователь отредактировал сообщение в кейсе `{case.case_id}`.\n"
-                "Новая версия сообщения ниже."
-            ),
-            parse_mode="Markdown",
-        )
-
-        # Telegram присылает edited_message только на один элемент альбома
-        # (обычно тот, у которого подпись). Если копировать только его,
-        # в админке останется одна картинка вместо всей группы.
-        source_ids = case.source_message_ids
-        caption_too_long = (
-            message.content_type != "text" and len(edited_text) > CAPTION_LIMIT
-        )
-
-        if len(source_ids) > 1:
-            copied_ids = await media_bridge.copy_many(
-                bot=message.bot,
-                from_chat_id=message.chat.id,
-                to_chat_id=settings.admin_chat_id,
-                message_ids=source_ids,
-                remove_caption=caption_too_long,
-            )
-            if caption_too_long:
-                await message.bot.send_message(
+        caption = preview_post_text(case) if case.is_previewing else raw_post_text(case)
+        edited_in_place = False
+        if replacement and case.admin_content_message_ids:
+            try:
+                frame_index = case.source_message_ids.index(message.message_id)
+            except ValueError:
+                frame_index = 0
+            if 0 <= frame_index < len(case.admin_content_message_ids):
+                target_id = case.admin_content_message_ids[frame_index]
+                frame_caption = caption if frame_index == 0 else None
+                if len(frame_caption or "") > CAPTION_LIMIT:
+                    frame_caption = ""
+                edited_in_place = await edit_case_post_media(
+                    message.bot,
                     chat_id=settings.admin_chat_id,
-                    text=edited_text,
-                    entities=edited_entities or None,
+                    message_id=target_id,
+                    item=replacement,
+                    caption=frame_caption,
                 )
-            if copied_ids:
-                case.admin_content_message_ids = list(copied_ids)
-            case_store.persist_case(case)
-            return
+                if edited_in_place and frame_index != 0:
+                    if case.is_previewing:
+                        await show_post_preview(
+                            message.bot, settings.admin_chat_id, case
+                        )
+                    else:
+                        await show_post_raw(message.bot, settings.admin_chat_id, case)
 
-        if caption_too_long:
-            copied = await media_bridge.copy_single(
-                bot=message.bot,
-                from_chat_id=message.chat.id,
-                to_chat_id=settings.admin_chat_id,
-                message_id=message.message_id,
-                caption="",
-            )
-            await message.bot.send_message(
-                chat_id=settings.admin_chat_id,
-                text=edited_text,
-                entities=edited_entities or None,
-            )
-            case.admin_content_message_ids = [copied.message_id]
-            case_store.persist_case(case)
-            return
+        if not edited_in_place:
+            if case.is_previewing:
+                edited_in_place = await show_post_preview(
+                    message.bot, settings.admin_chat_id, case
+                )
+            else:
+                edited_in_place = await show_post_raw(
+                    message.bot, settings.admin_chat_id, case
+                )
+        if not edited_in_place:
+            try:
+                copy_index = case.source_message_ids.index(message.message_id)
+            except ValueError:
+                copy_index = 0
+            if 0 <= copy_index < len(case.admin_content_message_ids):
+                copy_id = case.admin_content_message_ids[copy_index]
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=settings.admin_chat_id,
+                        message_id=copy_id,
+                        text=edited_text or caption,
+                        entities=edited_entities or None,
+                    )
+                except TelegramBadRequest:
+                    try:
+                        await message.bot.edit_message_caption(
+                            chat_id=settings.admin_chat_id,
+                            message_id=copy_id,
+                            caption=caption if len(caption) <= CAPTION_LIMIT else None,
+                            caption_entities=(
+                                edited_entities if not case.is_previewing else None
+                            ),
+                        )
+                    except TelegramBadRequest:
+                        pass
 
-        copied = await media_bridge.copy_single(
-            bot=message.bot,
-            from_chat_id=message.chat.id,
-            to_chat_id=settings.admin_chat_id,
-            message_id=message.message_id,
-        )
-        case.admin_content_message_ids = [copied.message_id]
         case_store.persist_case(case)
 
     return router

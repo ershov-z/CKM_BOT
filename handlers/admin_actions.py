@@ -11,6 +11,7 @@ from __future__ import annotations
 """
 
 import asyncio
+import logging
 import re
 import time
 from datetime import datetime
@@ -34,6 +35,7 @@ from handlers.ui import (
 )
 from services.album_publish import publish_plain_album
 from services.ban_store import BanStore
+from services.case_card import edit_case_control, show_post_preview, show_post_raw
 from services.case_store import CaseRecord, CaseStore, RepublishSnapshot
 from services.media_bridge import MediaBridge
 from services.message_content import (
@@ -57,6 +59,7 @@ from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
 CASE_ID_RE = re.compile(r"Кейс `([0-9a-fA-F]{8})`")
+logger = logging.getLogger(__name__)
 
 
 def create_admin_router(
@@ -139,26 +142,18 @@ def create_admin_router(
         case.preview_message_ids = []
 
     async def restore_case_control(bot: Bot, case: CaseRecord) -> None:
-        """Возвращает карточку кейса к исходным кнопкам модерации."""
+        """Возвращает пост к сырому виду и control к стартовым кнопкам."""
         await delete_preview_replicas(bot, case)
-        if case.control_message_id is None:
-            return
-        restore_text = case.control_text_backup or DEFAULT_CONTROL_TEXT
-        restore_entities = case.control_entities_backup or None
-        try:
-            await bot.edit_message_text(
-                chat_id=settings.admin_chat_id,
-                message_id=case.control_message_id,
-                text=restore_text,
-                entities=restore_entities,
-                reply_markup=moderation_keyboard(case.case_id),
-            )
-        except TelegramBadRequest:
-            await bot.edit_message_reply_markup(
-                chat_id=settings.admin_chat_id,
-                message_id=case.control_message_id,
-                reply_markup=moderation_keyboard(case.case_id),
-            )
+        await show_post_raw(bot, settings.admin_chat_id, case)
+        await edit_case_control(
+            bot,
+            chat_id=settings.admin_chat_id,
+            case=case,
+            text=case.control_text_backup or DEFAULT_CONTROL_TEXT,
+            entities=case.control_entities_backup or None,
+            reply_markup=moderation_keyboard(case.case_id),
+        )
+        case.is_previewing = False
 
     def remember_control_backup(case: CaseRecord, message: Message | None) -> None:
         if case.control_text_backup is not None:
@@ -171,34 +166,27 @@ def create_admin_router(
         case.control_entities_backup = list(message.entities or [])
 
     async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
-        """Служебный заголовок + точная копия поста, который уйдёт в канал."""
+        """Правит живой пост под канал и меняет только кнопки control."""
         await delete_preview_replicas(bot, case)
+        await show_post_preview(bot, settings.admin_chat_id, case)
+        control_text = case.control_text_backup or DEFAULT_CONTROL_TEXT
         if case.control_message_id is None:
             created = await bot.send_message(
                 chat_id=settings.admin_chat_id,
-                text=PREVIEW_HEADER,
+                text=control_text,
                 reply_markup=tagged_preview_keyboard(case.case_id),
             )
             case.control_message_id = created.message_id
         else:
-            try:
-                await bot.edit_message_text(
-                    chat_id=settings.admin_chat_id,
-                    message_id=case.control_message_id,
-                    text=PREVIEW_HEADER,
-                    reply_markup=tagged_preview_keyboard(case.case_id),
-                )
-            except TelegramBadRequest:
-                await bot.edit_message_reply_markup(
-                    chat_id=settings.admin_chat_id,
-                    message_id=case.control_message_id,
-                    reply_markup=tagged_preview_keyboard(case.case_id),
-                )
-        case.preview_message_ids = await render_case_to_chat(
-            bot,
-            case,
-            settings.admin_chat_id,
-        )
+            await edit_case_control(
+                bot,
+                chat_id=settings.admin_chat_id,
+                case=case,
+                text=control_text,
+                entities=case.control_entities_backup or None,
+                reply_markup=tagged_preview_keyboard(case.case_id),
+            )
+        case.is_previewing = True
         case_store.persist_case(case)
 
     async def publish_case_with_tags(bot: Bot, case: CaseRecord) -> None:
@@ -498,20 +486,22 @@ def create_admin_router(
         case: CaseRecord,
         status: str,
         note: str,
-        send_case_note: bool = True,
     ) -> None:
-        """Закрывает кейс: снимает кнопки, меняет статус и пишет сервисную отметку."""
-        await disable_case_controls(bot, case)
+        """Закрывает кейс: пишет статус в control и снимает кнопки."""
+        edited = await edit_case_control(
+            bot,
+            chat_id=settings.admin_chat_id,
+            case=case,
+            text=f"Кейс `{case.case_id}`: {note}",
+            reply_markup=None,
+            parse_mode="Markdown",
+        )
+        if not edited:
+            await disable_case_controls(bot, case)
         # Статус пишем в CaseStore, чтобы кейс исчез из open_cases.json и не лежал там
         # дольше необходимого для модерации времени.
         case_store.mark_done(case.case_id, status)
-        if send_case_note:
-            note_message = await bot.send_message(
-                chat_id=settings.admin_chat_id,
-                text=f"Кейс `{case.case_id}`: {note}",
-                parse_mode="Markdown",
-            )
-            case_store.index_case(case, extra_message_ids=[note_message.message_id])
+        case_store.index_case(case)
 
     def snapshot_from_live_case(case: CaseRecord) -> RepublishSnapshot:
         return RepublishSnapshot(
@@ -607,16 +597,22 @@ def create_admin_router(
             copied_type = "rich_message"
 
         case_id = uuid4().hex[:8]
+        control_text = "Повторная подготовка к отправке. Выберите действия с анонимкой"
+        if not complete:
+            control_text += (
+                "\n\nЕсли это был альбом или тейк из нескольких сообщений, "
+                "ответьте /again на служебное сообщение кейса — иначе уйдёт только этот пост."
+            )
         try:
             control = await message.bot.send_message(
                 chat_id=settings.admin_chat_id,
-                text="Повторная подготовка к отправке. Выберите действия с анонимкой",
+                text=control_text,
                 reply_to_message_id=replied.message_id,
                 reply_markup=moderation_keyboard(case_id),
             )
         except TelegramBadRequest:
             control = await message.reply(
-                "Повторная подготовка к отправке. Выберите действия с анонимкой",
+                control_text,
                 reply_markup=moderation_keyboard(case_id),
             )
 
@@ -636,16 +632,6 @@ def create_admin_router(
             media_items=list(snapshot.media_items),
         )
         case_store.add_case(case)
-        extra = ""
-        if not complete:
-            extra = (
-                "\nЕсли это был альбом или тейк из нескольких сообщений, "
-                "ответьте /again на служебное сообщение кейса — иначе уйдёт только этот пост."
-            )
-        await message.answer(
-            f"Кейс `{case.case_id}` снова подготовлен к отправке.{extra}",
-            parse_mode="Markdown",
-        )
 
     @router.message(F.chat.id == settings.admin_chat_id, Command("again"))
     async def on_again_command(message: Message) -> None:
@@ -709,14 +695,16 @@ def create_admin_router(
             except Exception as exc:
                 scored = []
                 case.selected_tags = ["#тейк"]
-                await query.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=(
-                        "Не удалось сгенерировать теги через Chad API.\n"
-                        f"Причина: {exc}\n"
-                        "Использован fallback: #тейк"
-                    ),
+                logger.exception("tag scoring failed for case %s", case.case_id)
+                case.is_waiting_tag_edit = False
+                remember_control_backup(case, query.message)
+                await send_tag_preview(query.bot, case)
+                case_store.persist_case(case)
+                await query.answer(
+                    f"Теги не сгенерированы, fallback #тейк: {exc}"[:180],
+                    show_alert=True,
                 )
+                return
 
             case.is_waiting_tag_edit = False
             remember_control_backup(case, query.message)
@@ -727,17 +715,14 @@ def create_admin_router(
                 score_lines = "\n".join(
                     f"{tag}: {score_map.get(tag.lower(), 0.0):.1f}" for tag in TAG_CATALOG
                 )
-                selected_lines = "\n".join(case.selected_tags)
-                await query.bot.send_message(
-                    chat_id=settings.admin_chat_id,
-                    text=(
-                        "Лог скоринга тегов:\n"
-                        f"{score_lines}\n\n"
-                        "Выбраны (score > 7):\n"
-                        f"{selected_lines}"
-                    ),
+                logger.info(
+                    "tag scores case=%s\n%s\nselected=%s",
+                    case.case_id,
+                    score_lines,
+                    case.selected_tags,
                 )
-            await query.answer("Теги сгенерированы.")
+            selected = " ".join(case.selected_tags) or "#тейк"
+            await query.answer(f"Выбраны: {selected}"[:190])
             return
 
         if action == "reject":
@@ -774,11 +759,8 @@ def create_admin_router(
                 return
             nonlocal pending_reply_case_id
             pending_reply_case_id = case.case_id
-            await query.answer("Отправьте следующее сообщение в чат.")
-            await query.bot.send_message(
-                chat_id=settings.admin_chat_id,
-                text="Режим ответа включён. Напишите следующее сообщение в чат ответом на это сообщение.",
-                parse_mode="Markdown",
+            await query.answer(
+                "Режим ответа включён. Напишите следующее сообщение в чат."
             )
             return
 
@@ -1025,6 +1007,8 @@ def create_admin_router(
         else:
             selected.add(key)
         case.selected_tags = [item for item in TAG_CATALOG if item.lower() in selected]
+        if case.is_previewing:
+            await show_post_preview(query.bot, settings.admin_chat_id, case)
 
         if case.control_message_id is not None:
             await query.bot.edit_message_reply_markup(
@@ -1446,11 +1430,6 @@ def create_admin_router(
             to_chat_id=case.user_chat_id,
             message_ids=[msg.message_id for msg in messages],
         )
-        await messages[0].bot.send_message(
-            chat_id=settings.admin_chat_id,
-            text=f"Сообщение отправлено пользователю! Кейс `{case.case_id}` остается открытым.",
-            parse_mode="Markdown",
-        )
 
     @router.message(F.chat.id == settings.admin_chat_id)
     async def on_admin_reply_message(message: Message) -> None:
@@ -1485,7 +1464,6 @@ def create_admin_router(
             case_store.pop_pending_tag_edit(message.from_user.id)
             remember_control_backup(case, message.reply_to_message)
             await send_tag_preview(message.bot, case)
-            await message.answer("Теги обновлены.")
             return
 
         pending_case_id = pending_reply_case_id
@@ -1521,11 +1499,6 @@ def create_admin_router(
             from_chat_id=settings.admin_chat_id,
             to_chat_id=case.user_chat_id,
             message_id=message.message_id,
-        )
-        await message.bot.send_message(
-            chat_id=settings.admin_chat_id,
-            text=f"Сообщение отправлено пользователю! Кейс `{case.case_id}` остается открытым.",
-            parse_mode="Markdown",
         )
 
     return router
