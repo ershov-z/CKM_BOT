@@ -241,11 +241,6 @@ def create_user_router(
                                 chat_id=settings.admin_chat_id,
                                 items=media_items,
                                 caption=album_caption,
-                                caption_entities=(
-                                    None
-                                    if caption_too_long
-                                    else (single_content_entities or None)
-                                ),
                             )
                         except TelegramBadRequest:
                             sent_album = []

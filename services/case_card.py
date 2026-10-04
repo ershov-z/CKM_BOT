@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Правка живого поста кейса и служебного control в админ-чате."""
 
+import logging
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
@@ -16,7 +18,9 @@ from aiogram.types import (
 
 from services.case_store import CaseRecord
 from services.message_content import MediaItem, content_rejects_caption
-from services.publish_content import compose_single_text_with_tags, entities_within_text
+from services.publish_content import SENT_VIA, compose_single_text_with_tags, entities_within_text
+
+logger = logging.getLogger(__name__)
 
 CAPTION_LIMIT = 1024
 TEXT_LIMIT = 4096
@@ -58,6 +62,21 @@ def preview_post_text(case: CaseRecord) -> str:
 def raw_post_text(case: CaseRecord) -> str:
     """Исходный текст/подпись без футера и тегов."""
     return (case.single_content_text or "").strip()
+
+
+def fit_text_to_limit(text: str, limit: int) -> str:
+    """Ужимает подпись, сохраняя хвост «Прислано через» и теги."""
+    if len(text) <= limit:
+        return text
+    marker = f"\n\n{SENT_VIA}"
+    idx = text.find(marker)
+    if idx == -1:
+        return text[:limit]
+    footer = text[idx + 2 :]
+    room = limit - len(footer) - 2
+    if room < 1:
+        return footer[:limit]
+    return f"{text[:idx][:room].rstrip()}\n\n{footer}"
 
 
 async def edit_case_control(
@@ -107,37 +126,73 @@ async def edit_case_post(
     entities: list[MessageEntity] | None = None,
     allow_entities: bool = False,
 ) -> bool:
-    """Правит живой пост: text или caption первого контентного сообщения."""
-    kind = post_edit_kind(case)
-    if kind == "none" or not case.admin_content_message_ids:
+    """Правит живой пост: caption, затем media, затем text.
+
+    edit_message_caption падает на фото/альбоме без исходной подписи
+    («there is no caption in the message to edit»). Тогда ставим подпись
+    через edit_message_media с тем же file_id.
+    """
+    if not case.admin_content_message_ids:
+        return False
+    if case.is_composed_multi_post:
         return False
     target_id = case.admin_content_message_ids[0]
-    safe_entities = entities_within_text(text, entities) if allow_entities else None
+    kind = post_edit_kind(case)
     if kind == "text":
-        if not text or len(text) > TEXT_LIMIT:
-            return False
+        methods = ("text", "caption", "media")
+    else:
+        methods = ("caption", "media", "text")
+    safe_entities = entities_within_text(text, entities) if allow_entities else None
+    caption_text = fit_text_to_limit(text, CAPTION_LIMIT)
+    last_error: TelegramBadRequest | None = None
+    for method in methods:
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=target_id,
-                text=text,
-                entities=safe_entities,
-            )
-            return True
+            if method == "text":
+                if not text or len(text) > TEXT_LIMIT:
+                    continue
+                text_kwargs: dict[str, object] = {
+                    "chat_id": chat_id,
+                    "message_id": target_id,
+                    "text": text,
+                }
+                if safe_entities:
+                    text_kwargs["entities"] = safe_entities
+                await bot.edit_message_text(**text_kwargs)
+                return True
+            if method == "caption":
+                caption_kwargs: dict[str, object] = {
+                    "chat_id": chat_id,
+                    "message_id": target_id,
+                    "caption": caption_text,
+                }
+                if safe_entities:
+                    caption_kwargs["caption_entities"] = safe_entities
+                await bot.edit_message_caption(**caption_kwargs)
+                return True
+            if method == "media":
+                if not case.media_items:
+                    continue
+                if await edit_case_post_media(
+                    bot,
+                    chat_id=chat_id,
+                    message_id=target_id,
+                    item=case.media_items[0],
+                    caption=caption_text,
+                ):
+                    return True
         except TelegramBadRequest as exc:
-            return is_not_modified(exc)
-    if len(text) > CAPTION_LIMIT:
-        return False
-    try:
-        await bot.edit_message_caption(
-            chat_id=chat_id,
-            message_id=target_id,
-            caption=text or None,
-            caption_entities=safe_entities,
+            if is_not_modified(exc):
+                return True
+            last_error = exc
+            continue
+    if last_error is not None:
+        logger.warning(
+            "edit_case_post failed case=%s kind=%s: %s",
+            case.case_id,
+            kind,
+            last_error,
         )
-        return True
-    except TelegramBadRequest as exc:
-        return is_not_modified(exc)
+    return False
 
 
 async def show_post_preview(bot: Bot, chat_id: int, case: CaseRecord) -> bool:

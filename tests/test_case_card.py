@@ -8,10 +8,12 @@ from aiogram.exceptions import TelegramBadRequest
 from services.case_card import (
     edit_case_control,
     edit_case_post,
+    fit_text_to_limit,
     post_edit_kind,
     preview_post_text,
     show_post_preview,
 )
+from services.message_content import MediaItem
 from services.case_store import CaseRecord
 from services.publish_content import SENT_VIA, compose_single_text_with_tags
 
@@ -42,6 +44,15 @@ def _case(**kwargs) -> CaseRecord:
 
 
 class CaseCardKindTests(unittest.TestCase):
+    def test_fit_caption_keeps_footer_and_tags(self) -> None:
+        tags = "\n".join(["#тейк", "#фест"])
+        text = f"{'A' * 1000}\n\n{SENT_VIA}\n\n{tags}"
+        fitted = fit_text_to_limit(text, 1024)
+        self.assertLessEqual(len(fitted), 1024)
+        self.assertIn(SENT_VIA, fitted)
+        self.assertIn("#тейк", fitted)
+        self.assertIn("#фест", fitted)
+
     def test_preview_text_matches_publish_compose(self) -> None:
         case = _case()
         self.assertEqual(preview_post_text(case), compose_single_text_with_tags(case))
@@ -120,6 +131,20 @@ class CaseCardEditTests(unittest.IsolatedAsyncioTestCase):
         bot.edit_message_text.assert_awaited_once()
         self.assertEqual(bot.edit_message_text.await_args.kwargs["text"], composed)
         bot.edit_message_caption.assert_not_called()
+
+    async def test_edit_post_uses_media_when_caption_missing(self) -> None:
+        bot = _bot()
+        bot.edit_message_caption.side_effect = TelegramBadRequest(
+            method=Mock(),
+            message="there is no caption in the message to edit",
+        )
+        case = _case(media_items=[MediaItem(kind="photo", file_id="file-1")])
+        composed = preview_post_text(case)
+        ok = await edit_case_post(bot, chat_id=99, case=case, text=composed)
+        self.assertTrue(ok)
+        bot.edit_message_media.assert_awaited_once()
+        media = bot.edit_message_media.await_args.kwargs["media"]
+        self.assertEqual(media.caption, composed)
 
     async def test_show_preview_skips_entities(self) -> None:
         bot = _bot()

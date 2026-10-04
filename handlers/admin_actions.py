@@ -168,7 +168,9 @@ def create_admin_router(
     async def send_tag_preview(bot: Bot, case: CaseRecord) -> None:
         """Правит живой пост под канал и меняет только кнопки control."""
         await delete_preview_replicas(bot, case)
-        await show_post_preview(bot, settings.admin_chat_id, case)
+        updated = await show_post_preview(bot, settings.admin_chat_id, case)
+        if not updated:
+            logger.warning("preview caption was not applied for case %s", case.case_id)
         control_text = case.control_text_backup or DEFAULT_CONTROL_TEXT
         if case.control_message_id is None:
             created = await bot.send_message(
@@ -666,9 +668,12 @@ def create_admin_router(
             return
 
         if action == "publish":
-            # Ручная публикация: сначала модератор явно выбирает теги кнопками.
+            # Ручная публикация: сразу рисуем футер на живом посте, теги дописываются по клику.
             selected = normalize_tags(case.selected_tags)
             case.selected_tags = selected
+            remember_control_backup(case, query.message)
+            await show_post_preview(query.bot, settings.admin_chat_id, case)
+            case.is_previewing = True
             if case.control_message_id is not None:
                 await query.bot.edit_message_reply_markup(
                     chat_id=settings.admin_chat_id,
@@ -679,6 +684,7 @@ def create_admin_router(
                         case.selected_tags,
                     ),
                 )
+            case_store.persist_case(case)
             await query.answer("Выберите теги и нажмите Опубликовать.")
             return
 
@@ -819,6 +825,9 @@ def create_admin_router(
         else:
             selected.add(key)
         case.selected_tags = [item for item in TAG_CATALOG if item.lower() in selected]
+        await show_post_preview(query.bot, settings.admin_chat_id, case)
+        case.is_previewing = True
+        case_store.persist_case(case)
 
         if case.control_message_id is not None:
             await query.bot.edit_message_reply_markup(
@@ -869,12 +878,8 @@ def create_admin_router(
         if not case or case.status != "open":
             await query.answer("Кейс уже обработан или не найден.", show_alert=True)
             return
-        if case.control_message_id is not None:
-            await query.bot.edit_message_reply_markup(
-                chat_id=settings.admin_chat_id,
-                message_id=case.control_message_id,
-                reply_markup=moderation_keyboard(case.case_id),
-            )
+        await restore_case_control(query.bot, case)
+        case_store.persist_case(case)
         await query.answer("Возврат к действиям кейса.")
 
     @router.callback_query(F.data.startswith("pub_done:"))
