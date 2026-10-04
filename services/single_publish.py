@@ -43,11 +43,27 @@ async def ensure_composed_on_message(
     tags: str,
     media_item: MediaItem | None = None,
 ) -> list[int]:
-    """Если в посте нет «Прислано через», дописывает caption/media или шлёт футер."""
+    """Если в посте нет «Прислано через», дописывает text/caption/media или шлёт футер.
+
+    copy_message(caption=...) для текстовых сообщений игнорируется Telegram.
+    Поэтому после copy текстового поста нужен edit_message_text, не caption.
+    """
     if message_has_sent_via(message):
         return []
     message_id = getattr(message, "message_id", None)
     if message_id is not None:
+        # Текстовый пост: caption-edit на нём всегда падает.
+        if getattr(message, "text", None) is not None and media_item is None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    text=composed,
+                )
+                return []
+            except TelegramBadRequest as exc:
+                if is_not_modified(exc):
+                    return []
         try:
             await bot.edit_message_caption(
                 chat_id=channel_id,
@@ -58,6 +74,18 @@ async def ensure_composed_on_message(
         except TelegramBadRequest as exc:
             if is_not_modified(exc):
                 return []
+        # MessageId-only ответ без text/caption: всё равно пробуем text-edit.
+        if media_item is None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    text=composed,
+                )
+                return []
+            except TelegramBadRequest as exc:
+                if is_not_modified(exc):
+                    return []
         if media_item is not None and await edit_case_post_media(
             bot,
             chat_id=channel_id,

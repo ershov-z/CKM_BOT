@@ -352,20 +352,22 @@ def create_admin_router(
             await ensure_footer_after_copy(copied, tags or None)
             return posted
 
-        if case.single_content_type == "text":
-            if case.user_chat_id is None:
-                # После рестарта или /again админская копия может быть rich-постом
-                # с альбомами внутри текста. send_message оставил бы только текст.
-                copied = await copy_single_for_publish()
-                await ensure_footer_after_copy(copied, tags or None)
-                return posted
+        # Обычный текст — всегда одним send_message с футером внутри.
+        # copy_message(caption=...) для текста Telegram игнорирует; старый путь
+        # после рестарта копировал оригинал и слал «Прислано через»/теги вторым сообщением.
+        if case.single_content_type == "text" or (
+            not case.media_items
+            and not case.is_media_group
+            and bool(base_text)
+            and not content_rejects_caption(case.single_content_type or "text")
+        ):
             note_ids(
                 await send_text_with_composed(
                     bot,
                     channel_id=chat_id,
                     composed=composed,
                     tags=tags,
-                    entities=entities,
+                    entities=entities if case.single_content_type == "text" else None,
                 )
             )
             return posted

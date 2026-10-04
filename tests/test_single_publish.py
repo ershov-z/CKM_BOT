@@ -161,6 +161,36 @@ class CopySinglePublishTests(unittest.IsolatedAsyncioTestCase):
         bot.edit_message_media.assert_awaited_once()
         bot.send_message.assert_not_called()
 
+    async def test_text_copy_edits_message_text_not_separate_footer(self) -> None:
+        bot = _bot()
+        bot.edit_message_text = AsyncMock()
+        composed = f"правила косплея\n\n{SENT_VIA}\n\n#тейк"
+        bot.copy_message.return_value = SimpleNamespace(
+            message_id=50,
+            caption=None,
+            text="правила косплея",
+        )
+        bot.edit_message_caption.side_effect = TelegramBadRequest(
+            method=Mock(),
+            message="there is no caption in the message to edit",
+        )
+
+        await copy_single_with_composed(
+            bot,
+            channel_id=-100,
+            from_chat_id=1,
+            message_id=10,
+            composed=composed,
+            tags="#тейк",
+        )
+
+        bot.edit_message_text.assert_awaited_once_with(
+            chat_id=-100,
+            message_id=50,
+            text=composed,
+        )
+        bot.send_message.assert_not_called()
+
 
 class SendStoredMediaTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_photo_with_composed_caption(self) -> None:
