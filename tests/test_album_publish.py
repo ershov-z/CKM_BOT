@@ -85,6 +85,33 @@ class AlbumPublishTests(unittest.IsolatedAsyncioTestCase):
         )
         bot.send_message.assert_not_called()
 
+    async def test_edits_caption_when_send_returns_message_id_only(self) -> None:
+        bot = _bot()
+        bridge = _bridge()
+        composed = f"Мастерская\n\n{SENT_VIA}\n\n#костюмы"
+        first = SimpleNamespace(message_id=11)
+        bridge.send_album.return_value = [first, SimpleNamespace(message_id=12)]
+
+        await publish_plain_album(
+            bot,
+            bridge,
+            channel_id=-100,
+            source_chat_id=1,
+            source_message_ids=[10, 11],
+            media_items=_album_items(),
+            base_text="Мастерская",
+            composed=composed,
+            tags="#костюмы",
+        )
+
+        bridge.copy_many.assert_not_called()
+        bot.edit_message_caption.assert_awaited_once_with(
+            chat_id=-100,
+            message_id=11,
+            caption=composed,
+        )
+        bot.send_message.assert_not_called()
+
     async def test_fallback_copy_does_not_follow_successful_send(self) -> None:
         bot = _bot()
         bridge = _bridge()

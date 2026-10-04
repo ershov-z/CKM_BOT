@@ -55,3 +55,4 @@ class PublishContentTests(unittest.TestCase):
             message_has_sent_via(SimpleNamespace(text="hello", caption=None))
         )
         self.assertFalse(message_has_sent_via(None))
+        self.assertFalse(message_has_sent_via(SimpleNamespace(message_id=7)))

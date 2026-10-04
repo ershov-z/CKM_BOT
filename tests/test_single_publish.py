@@ -7,15 +7,22 @@ from unittest.mock import AsyncMock, Mock
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import MessageEntity
 
+from services.message_content import MediaItem
 from services.publish_content import SENT_VIA, entities_within_text
-from services.single_publish import copy_single_with_composed, send_text_with_composed
+from services.single_publish import (
+    copy_single_with_composed,
+    send_stored_media_with_composed,
+    send_text_with_composed,
+)
 
 
 def _bot() -> Mock:
     bot = Mock()
     bot.copy_message = AsyncMock()
     bot.edit_message_caption = AsyncMock()
+    bot.edit_message_media = AsyncMock()
     bot.send_message = AsyncMock()
+    bot.send_photo = AsyncMock()
     return bot
 
 
@@ -109,6 +116,74 @@ class CopySinglePublishTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot.copy_message.await_count, 2)
         bot.edit_message_caption.assert_awaited_once()
+        bot.send_message.assert_not_called()
+
+    async def test_message_id_only_copy_still_edits_caption(self) -> None:
+        bot = _bot()
+        composed = f"фото\n\n{SENT_VIA}\n\n#тейк"
+        bot.copy_message.return_value = SimpleNamespace(message_id=50)
+
+        await copy_single_with_composed(
+            bot,
+            channel_id=-100,
+            from_chat_id=1,
+            message_id=10,
+            composed=composed,
+            tags="#тейк",
+        )
+
+        bot.edit_message_caption.assert_awaited_once()
+        bot.send_message.assert_not_called()
+
+    async def test_uses_media_edit_when_caption_cannot_be_added(self) -> None:
+        bot = _bot()
+        composed = f"фото\n\n{SENT_VIA}\n\n#тейк"
+        bot.copy_message.return_value = SimpleNamespace(
+            message_id=50,
+            caption=None,
+            text=None,
+        )
+        bot.edit_message_caption.side_effect = TelegramBadRequest(
+            method=Mock(),
+            message="there is no caption in the message to edit",
+        )
+
+        await copy_single_with_composed(
+            bot,
+            channel_id=-100,
+            from_chat_id=1,
+            message_id=10,
+            composed=composed,
+            tags="#тейк",
+            media_item=MediaItem(kind="photo", file_id="file-1"),
+        )
+
+        bot.edit_message_media.assert_awaited_once()
+        bot.send_message.assert_not_called()
+
+
+class SendStoredMediaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sends_photo_with_composed_caption(self) -> None:
+        bot = _bot()
+        composed = f"фото\n\n{SENT_VIA}\n\n#тейк"
+        bot.send_photo.return_value = SimpleNamespace(
+            message_id=50,
+            caption=composed,
+            text=None,
+        )
+
+        posted = await send_stored_media_with_composed(
+            bot,
+            channel_id=-100,
+            item=MediaItem(kind="photo", file_id="file-1"),
+            composed=composed,
+            tags="#тейк",
+        )
+
+        self.assertEqual(posted, [50])
+        self.assertEqual(bot.send_photo.await_args.kwargs["photo"], "file-1")
+        self.assertEqual(bot.send_photo.await_args.kwargs["caption"], composed)
+        bot.copy_message.assert_not_called()
         bot.send_message.assert_not_called()
 
 

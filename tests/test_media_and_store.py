@@ -96,6 +96,8 @@ class AlbumMediaBuildTests(unittest.TestCase):
         self.assertIsNone(media[1].caption)
         self.assertIsInstance(media[2], InputMediaVideo)
         self.assertIsNone(media[2].caption)
+        dumped = media[0].model_dump(exclude_unset=True)
+        self.assertNotIn("caption_entities", dumped)
 
     def test_skips_unknown_kind(self) -> None:
         media = build_album_media(

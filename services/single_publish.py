@@ -6,11 +6,21 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, MessageEntity
 
+from services.case_card import edit_case_post_media, is_not_modified
+from services.message_content import MediaItem
 from services.publish_content import (
     SENT_VIA,
     entities_within_text,
     message_has_sent_via,
 )
+
+_SEND_METHOD_BY_KIND = {
+    "photo": ("send_photo", "photo"),
+    "video": ("send_video", "video"),
+    "document": ("send_document", "document"),
+    "animation": ("send_animation", "animation"),
+    "audio": ("send_audio", "audio"),
+}
 
 
 async def send_sent_via_then_tags(bot: Bot, channel_id: int, tags: str) -> list[int]:
@@ -31,21 +41,74 @@ async def ensure_composed_on_message(
     message: Message | None,
     composed: str,
     tags: str,
+    media_item: MediaItem | None = None,
 ) -> list[int]:
-    """Если в посте нет «Прислано через», дописывает caption или шлёт футер."""
+    """Если в посте нет «Прислано через», дописывает caption/media или шлёт футер."""
     if message_has_sent_via(message):
         return []
-    if message is not None:
+    message_id = getattr(message, "message_id", None)
+    if message_id is not None:
         try:
             await bot.edit_message_caption(
                 chat_id=channel_id,
-                message_id=message.message_id,
+                message_id=message_id,
                 caption=composed,
             )
             return []
-        except TelegramBadRequest:
-            pass
+        except TelegramBadRequest as exc:
+            if is_not_modified(exc):
+                return []
+        if media_item is not None and await edit_case_post_media(
+            bot,
+            chat_id=channel_id,
+            message_id=message_id,
+            item=media_item,
+            caption=composed,
+        ):
+            return []
     return await send_sent_via_then_tags(bot, channel_id, tags)
+
+
+async def send_stored_media_with_composed(
+    bot: Bot,
+    *,
+    channel_id: int,
+    item: MediaItem,
+    composed: str,
+    tags: str,
+) -> list[int]:
+    """Шлёт одно медиа по file_id с готовой подписью, без copy и без entities."""
+    spec = _SEND_METHOD_BY_KIND.get(item.kind)
+    if spec is None:
+        return []
+    method_name, arg_name = spec
+    method = getattr(bot, method_name, None)
+    if method is None:
+        return []
+    sent: Message | None
+    try:
+        sent = await method(
+            chat_id=channel_id,
+            caption=composed,
+            **{arg_name: item.file_id},
+        )
+    except TelegramBadRequest:
+        sent = None
+    posted: list[int] = []
+    message_id = getattr(sent, "message_id", None)
+    if message_id is not None:
+        posted.append(message_id)
+    posted.extend(
+        await ensure_composed_on_message(
+            bot,
+            channel_id=channel_id,
+            message=sent,
+            composed=composed,
+            tags=tags,
+            media_item=item,
+        )
+    )
+    return posted
 
 
 async def copy_single_with_composed(
@@ -56,6 +119,7 @@ async def copy_single_with_composed(
     message_id: int,
     composed: str,
     tags: str,
+    media_item: MediaItem | None = None,
 ) -> list[int]:
     """Копирует одно медиа с готовой подписью, без старых caption_entities.
 
@@ -83,8 +147,9 @@ async def copy_single_with_composed(
         # copy мог уже уйти в канал, повторный copy даст дубль.
         copied = None
     posted: list[int] = []
-    if copied is not None:
-        posted.append(copied.message_id)
+    copied_id = getattr(copied, "message_id", None)
+    if copied_id is not None:
+        posted.append(copied_id)
     posted.extend(
         await ensure_composed_on_message(
             bot,
@@ -92,6 +157,7 @@ async def copy_single_with_composed(
             message=copied,
             composed=composed,
             tags=tags,
+            media_item=media_item,
         )
     )
     return posted

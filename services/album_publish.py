@@ -6,6 +6,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
+from services.case_card import is_not_modified
 from services.media_bridge import MediaBridge
 from services.message_content import MediaItem
 from services.publish_content import SENT_VIA, message_has_sent_via
@@ -65,18 +66,21 @@ async def publish_plain_album(
             return []
 
     async def ensure_footer(first: Message | None) -> None:
+        """Дописывает подпись на первый кадр группы. media-edit не трогаем: рвёт альбом."""
         if message_has_sent_via(first):
             return
-        if first is not None and len(composed) <= caption_limit:
+        first_id = getattr(first, "message_id", None)
+        if first_id is not None and len(composed) <= caption_limit:
             try:
                 await bot.edit_message_caption(
                     chat_id=channel_id,
-                    message_id=first.message_id,
+                    message_id=first_id,
                     caption=composed,
                 )
                 return
-            except TelegramBadRequest:
-                pass
+            except TelegramBadRequest as exc:
+                if is_not_modified(exc):
+                    return
         posted.extend(await _send_footer(bot, channel_id, tags))
 
     if len(base_text) > caption_limit:
@@ -121,8 +125,11 @@ async def publish_plain_album(
                     message_id=copied_ids[0],
                     caption=composed,
                 )
-            except TelegramBadRequest:
-                posted.extend(await _send_footer(bot, channel_id, tags))
+                return posted
+            except TelegramBadRequest as exc:
+                if is_not_modified(exc):
+                    return posted
+            posted.extend(await _send_footer(bot, channel_id, tags))
         else:
             posted.extend(await _send_footer(bot, channel_id, tags))
         return posted

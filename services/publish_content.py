@@ -30,10 +30,16 @@ def compose_single_text_with_tags(case: CaseRecord) -> str:
 
 
 def message_has_sent_via(message: Message | None) -> bool:
-    """True, если в тексте или подписи уже есть служебная строка."""
+    """True, если в тексте или подписи уже есть служебная строка.
+
+    copy_message в aiogram часто возвращает MessageId без text/caption —
+    тогда считаем, что футера нет, и дописываем его отдельно.
+    """
     if message is None:
         return False
-    blob = "\n".join(part for part in (message.text, message.caption) if part)
+    text = getattr(message, "text", None)
+    caption = getattr(message, "caption", None)
+    blob = "\n".join(part for part in (text, caption) if part)
     return SENT_VIA in blob
 
 

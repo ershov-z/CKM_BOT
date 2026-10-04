@@ -53,7 +53,12 @@ from services.publish_content import (
     message_has_sent_via,
     tags_block,
 )
-from services.single_publish import copy_single_with_composed, send_text_with_composed
+from services.single_publish import (
+    copy_single_with_composed,
+    ensure_composed_on_message,
+    send_stored_media_with_composed,
+    send_text_with_composed,
+)
 from services.reject_reasons import format_admin_reject_guide, load_reject_reasons
 from services.tagging_service import TAG_CATALOG, TaggingService
 
@@ -286,10 +291,17 @@ def create_admin_router(
             copied: Message | None,
             tags_part: str | None,
         ) -> None:
-            """Если copy не вшил подпись и теги, досылает их отдельным сообщением."""
-            if message_has_sent_via(copied):
-                return
-            await send_sent_via_then_tags(tags_part)
+            """Если copy не вшил подпись и теги, дописывает их на тот же пост или следом."""
+            note_ids(
+                await ensure_composed_on_message(
+                    bot,
+                    channel_id=chat_id,
+                    message=copied,
+                    composed=composed,
+                    tags=tags_part or tags,
+                    media_item=case.media_items[0] if case.media_items else None,
+                )
+            )
 
         if case.is_media_group and case.is_composed_multi_post:
             note_message(
@@ -448,6 +460,17 @@ def create_admin_router(
             )
             return posted
 
+        if len(case.media_items) == 1:
+            note_ids(
+                await send_stored_media_with_composed(
+                    bot,
+                    channel_id=chat_id,
+                    item=case.media_items[0],
+                    composed=composed,
+                    tags=tags,
+                )
+            )
+            return posted
         note_ids(
             await copy_single_with_composed(
                 bot,
@@ -456,6 +479,7 @@ def create_admin_router(
                 message_id=source_message_ids[0],
                 composed=composed,
                 tags=tags,
+                media_item=case.media_items[0] if case.media_items else None,
             )
         )
         return posted

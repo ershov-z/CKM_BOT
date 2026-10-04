@@ -50,13 +50,13 @@ def build_album_media(
         if media_cls is None:
             continue
         if not media and caption:
-            media.append(
-                media_cls(
-                    media=item.file_id,
-                    caption=caption,
-                    caption_entities=caption_entities,
-                )
-            )
+            media_kwargs: dict[str, object] = {
+                "media": item.file_id,
+                "caption": caption,
+            }
+            if caption_entities:
+                media_kwargs["caption_entities"] = caption_entities
+            media.append(media_cls(**media_kwargs))
         else:
             media.append(media_cls(media=item.file_id))
     return media
