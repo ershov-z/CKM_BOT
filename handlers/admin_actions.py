@@ -63,6 +63,8 @@ from services.reject_reasons import format_admin_reject_guide, load_reject_reaso
 from services.tagging_service import TAG_CATALOG, TaggingService
 
 CAPTION_LIMIT = 1024
+# Служебный пользователь Telegram для сообщений анонимных админов группы.
+GROUP_ANONYMOUS_BOT_ID = 1087968824
 CASE_ID_RE = re.compile(r"Кейс `([0-9a-fA-F]{8})`")
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,10 @@ def create_admin_router(
     # Временные буферы для сценария "ответ админа пользователю".
     reply_media_group_buffer: dict[tuple[int, str], list[Message]] = {}
     reply_media_group_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
-    pending_reply_case_id: str | None = None
+    # message_id служебного «Ответьте на это сообщение» -> case_id.
+    # Ответ срабатывает только как reply на этот пост: так бот получает его
+    # и при privacy mode, и когда админ пишет от имени группы.
+    reply_prompts: dict[int, str] = {}
 
     def is_allowed_moderator(user_id: int | None) -> bool:
         """Проверяет, что действие выполняет пользователь из whitelist модераторов."""
@@ -789,11 +794,9 @@ def create_admin_router(
                     show_alert=True,
                 )
                 return
-            nonlocal pending_reply_case_id
-            pending_reply_case_id = case.case_id
-            await query.answer(
-                "Режим ответа включён. Напишите следующее сообщение в чат."
-            )
+            prompt = await send_reply_prompt(query)
+            reply_prompts[prompt.message_id] = case.case_id
+            await query.answer("Ответьте на служебное сообщение в чате.")
             return
 
         if action == "ban":
@@ -1428,22 +1431,62 @@ def create_admin_router(
             case.control_entities_backup = []
         await query.answer("Возврат к действиям кейса.")
 
-    async def flush_reply_media_group(group_key: tuple[int, str]) -> None:
+    async def send_reply_prompt(query: CallbackQuery) -> Message:
+        """Пишет в админ-чат пост, на который нужно ответить, чтобы ответить пользователю."""
+        thread_id = query.message.message_thread_id if query.message else None
+        reply_to_id = query.message.message_id if query.message else None
+        kwargs: dict[str, int] = {}
+        if thread_id:
+            kwargs["message_thread_id"] = thread_id
+        if reply_to_id:
+            kwargs["reply_to_message_id"] = reply_to_id
+        try:
+            return await query.bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text="Ответьте на это сообщение",
+                **kwargs,
+            )
+        except TelegramBadRequest:
+            kwargs.pop("reply_to_message_id", None)
+            return await query.bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text="Ответьте на это сообщение",
+                **kwargs,
+            )
+
+    def reply_prompt_case_id(message: Message) -> str | None:
+        replied = message.reply_to_message
+        if replied is None or replied.message_id is None:
+            return None
+        return reply_prompts.get(replied.message_id)
+
+    def may_answer_user(message: Message) -> bool:
+        """Пускает ответ модератора, в том числе отправленный анонимно от имени группы."""
+        if message.sender_chat and message.sender_chat.id == settings.admin_chat_id:
+            return True
+        # GroupAnonymousBot: Telegram подставляет его, когда админ не подписывает сообщения.
+        if message.from_user and message.from_user.id == GROUP_ANONYMOUS_BOT_ID:
+            return True
+        if not message.from_user or message.from_user.is_bot:
+            return False
+        return is_allowed_moderator(message.from_user.id)
+
+    async def flush_reply_media_group(
+        group_key: tuple[int, str],
+        case_id: str,
+        prompt_message_id: int,
+    ) -> None:
         """Обрабатывает ответ админа пользователю, если ответ пришел медиагруппой."""
-        nonlocal pending_reply_case_id
         await asyncio.sleep(1.0)
         messages = sorted(
             reply_media_group_buffer.pop(group_key, []),
             key=lambda item: item.message_id,
         )
         reply_media_group_tasks.pop(group_key, None)
+        reply_prompts.pop(prompt_message_id, None)
         if not messages:
             return
 
-        case_id = pending_reply_case_id
-        pending_reply_case_id = None
-        if not case_id:
-            return
         case = case_store.get_case(case_id)
         if not case or case.status != "open":
             return
@@ -1462,10 +1505,56 @@ def create_admin_router(
             message_ids=[msg.message_id for msg in messages],
         )
 
+    async def accept_user_reply(message: Message, case_id: str) -> None:
+        """Копирует reply на служебный пост автору кейса."""
+        if not may_answer_user(message):
+            return
+        replied = message.reply_to_message
+        if replied is None or replied.message_id is None:
+            return
+        case = case_store.get_case(case_id)
+        if not case or case.status != "open":
+            reply_prompts.pop(replied.message_id, None)
+            return
+        if case.user_chat_id is None:
+            reply_prompts.pop(replied.message_id, None)
+            await message.bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text="После рестарта reply недоступен: chat_id автора не восстановлен.",
+                reply_to_message_id=message.message_id,
+            )
+            return
+
+        if message.media_group_id:
+            if message.from_user:
+                sender_key = message.from_user.id
+            elif message.sender_chat:
+                sender_key = message.sender_chat.id
+            else:
+                sender_key = 0
+            key = (sender_key, message.media_group_id)
+            reply_media_group_buffer.setdefault(key, []).append(message)
+            if key not in reply_media_group_tasks:
+                reply_media_group_tasks[key] = asyncio.create_task(
+                    flush_reply_media_group(key, case_id, replied.message_id)
+                )
+            return
+
+        reply_prompts.pop(replied.message_id, None)
+        await media_bridge.copy_single(
+            bot=message.bot,
+            from_chat_id=settings.admin_chat_id,
+            to_chat_id=case.user_chat_id,
+            message_id=message.message_id,
+        )
+
     @router.message(F.chat.id == settings.admin_chat_id)
     async def on_admin_reply_message(message: Message) -> None:
-        """Ловит следующее сообщение модератора в режиме 'Ответить' и отправляет пользователю."""
-        nonlocal pending_reply_case_id
+        """Ловит reply на «Ответьте на это сообщение» и отправляет его пользователю."""
+        prompt_case_id = reply_prompt_case_id(message)
+        if prompt_case_id:
+            await accept_user_reply(message, prompt_case_id)
+            return
         if not message.from_user or message.from_user.is_bot:
             return
         if not is_allowed_moderator(message.from_user.id):
@@ -1496,40 +1585,5 @@ def create_admin_router(
             remember_control_backup(case, message.reply_to_message)
             await send_tag_preview(message.bot, case)
             return
-
-        pending_case_id = pending_reply_case_id
-        if not pending_case_id:
-            return
-
-        case = case_store.get_case(pending_case_id)
-        if not case or case.status != "open":
-            pending_reply_case_id = None
-            return
-        if case.user_chat_id is None:
-            pending_reply_case_id = None
-            # Очищаем pending и даём понятный сервисный ответ.
-            await message.bot.send_message(
-                chat_id=settings.admin_chat_id,
-                text="После рестарта reply недоступен: chat_id автора не восстановлен.",
-            )
-            return
-
-        if message.media_group_id:
-            sender_key = message.from_user.id if message.from_user else message.sender_chat.id
-            key = (sender_key, message.media_group_id)
-            reply_media_group_buffer.setdefault(key, []).append(message)
-            if key not in reply_media_group_tasks:
-                reply_media_group_tasks[key] = asyncio.create_task(
-                    flush_reply_media_group(key)
-                )
-            return
-
-        pending_reply_case_id = None
-        await media_bridge.copy_single(
-            bot=message.bot,
-            from_chat_id=settings.admin_chat_id,
-            to_chat_id=case.user_chat_id,
-            message_id=message.message_id,
-        )
 
     return router
