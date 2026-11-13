@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from services.message_content import needs_caption_split
 from services.publish_content import SENT_VIA, strip_sent_via_footer
 from services.take_copy import copy_take_to_admin, drop_duplicate_messages
 
@@ -141,6 +142,18 @@ class DropDuplicateTests(unittest.TestCase):
             _msg(4, photo=_photo("p1")),
         ]
         self.assertEqual(len(drop_duplicate_messages(messages)), 4)
+
+class CaptionSplitTests(unittest.TestCase):
+    def test_long_rich_post_is_not_split(self) -> None:
+        self.assertFalse(needs_caption_split("rich_message", "а" * 1300))
+        self.assertFalse(needs_caption_split("unknown", "а" * 1300))
+
+    def test_long_text_is_not_split(self) -> None:
+        self.assertFalse(needs_caption_split("text", "а" * 1300))
+
+    def test_long_photo_caption_is_split(self) -> None:
+        self.assertTrue(needs_caption_split("photo", "а" * 1300))
+        self.assertFalse(needs_caption_split("photo", "а" * 100))
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,7 @@ from services.message_content import (
     extract_media_item,
     extract_media_items,
     extract_message_text,
+    needs_caption_split,
     replace_media_item_for_message,
     resolve_content_type,
 )
@@ -150,7 +151,7 @@ def create_user_router(
             # В админ-чат копируем только контент, а не "пересланное сообщение":
             # это скрывает автора на стороне модерации.
             if len(source_message_ids) == 1:
-                if single_content_type != "text" and len(single_content_text) > CAPTION_LIMIT:
+                if needs_caption_split(single_content_type, single_content_text, CAPTION_LIMIT):
                     # Premium-кейс: caption длиннее лимита Bot API.
                     # Показываем админам такой кейс как "мультипост":
                     # медиа без подписи + текст отдельным сообщением.

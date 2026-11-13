@@ -135,6 +135,18 @@ def content_rejects_caption(content_type: str) -> bool:
     return content_type in NON_CAPTION_CONTENT_TYPES
 
 
+def needs_caption_split(content_type: str, text: str, limit: int = 1024) -> bool:
+    """True, если подпись медиа длиннее лимита и её надо слать отдельным текстом.
+
+    Только для типов с настоящей подписью. Текст и rich-посты копируются
+    целиком: caption="" для них Telegram игнорирует, и отдельный текст
+    следом превращал один длинный пост в «тейк из 2 постов» с дублем.
+    """
+    if content_type == "text" or content_rejects_caption(content_type):
+        return False
+    return len(text) > limit
+
+
 def extract_media_item(message: Message) -> MediaItem | None:
     """Достаёт file_id медиа из сообщения, если это кадр для альбома."""
     if message.photo:
