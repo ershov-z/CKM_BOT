@@ -315,13 +315,21 @@ def create_admin_router(
                     text=build_multi_start_text(case),
                 )
             )
+            # Публикуем копии из админ-чата — ровно то, что видел модератор.
+            # В личке автора может лежать пересланный пост со старым футером и
+            # тегами; при приёме тейка мы срезаем их только с админских копий.
+            take_chat_id = source_chat_id
+            take_message_ids = source_message_ids
+            if case.admin_content_message_ids:
+                take_chat_id = settings.admin_chat_id
+                take_message_ids = case.admin_content_message_ids
             try:
                 note_ids(
                     await media_bridge.copy_many(
                         bot=bot,
-                        from_chat_id=source_chat_id,
+                        from_chat_id=take_chat_id,
                         to_chat_id=chat_id,
-                        message_ids=source_message_ids,
+                        message_ids=take_message_ids,
                     )
                 )
             except Exception:

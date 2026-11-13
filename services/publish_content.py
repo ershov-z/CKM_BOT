@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Сборка подписи публикации: исходный текст, «Прислано через…», теги."""
 
+import re
+
 from aiogram.types import Message, MessageEntity
 
 from services.case_store import CaseRecord
@@ -9,6 +11,21 @@ from services.case_store import CaseRecord
 SENT_VIA = "Прислано через @backstage_staff_bot"
 PREVIEW_HEADER = "Предпросмотр публикации"
 DEFAULT_CONTROL_TEXT = "Выберите действия с анонимкой"
+
+
+_STALE_FOOTER_RE = re.compile(
+    rf"\s*{re.escape(SENT_VIA)}(?:\s*#[-\w]+)*\s*$"
+)
+
+
+def strip_sent_via_footer(text: str) -> str:
+    """Срезает хвост «Прислано через…» + теги, оставшийся от прошлой публикации.
+
+    Режем только в самом конце текста: упоминание бота посреди фразы не трогаем.
+    """
+    if not text or SENT_VIA not in text:
+        return text
+    return _STALE_FOOTER_RE.sub("", text)
 
 
 def tags_block(case: CaseRecord) -> str:

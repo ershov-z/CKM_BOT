@@ -31,6 +31,12 @@ from services.case_card import (
 )
 from services.case_store import CaseRecord, CaseStore
 from services.media_bridge import MediaBridge
+from services.publish_content import entities_within_text, strip_sent_via_footer
+from services.take_copy import (
+    copy_take_to_admin,
+    drop_duplicate_messages,
+    has_stale_footer,
+)
 from services.message_content import (
     extract_media_item,
     extract_media_items,
@@ -92,7 +98,8 @@ def create_user_router(
         """Собирает текст для LLM-тегирования из набора сообщений кейса."""
         chunks: list[str] = []
         for message in messages:
-            text = extract_message_text(message)
+            # Хвост прошлой публикации (футер + старые теги) не должен влиять на новые теги.
+            text = strip_sent_via_footer(extract_message_text(message))
             if text:
                 chunks.append(text)
                 continue
@@ -120,8 +127,16 @@ def create_user_router(
         keyboard = moderation_keyboard(case_id)
         control_text = build_reply_context_text(first)
         tagging_content = build_tagging_content(messages)
-        single_content_text = extract_message_text(first)
-        single_content_entities = list(first.entities or first.caption_entities or [])
+        # Пересланный из канала пост уже несёт «Прислано через…» и старые теги:
+        # срезаем хвост, иначе при публикации футер и теги задвоятся.
+        single_content_text = strip_sent_via_footer(extract_message_text(first))
+        single_content_entities = (
+            entities_within_text(
+                single_content_text,
+                list(first.entities or first.caption_entities or []),
+            )
+            or []
+        )
         single_content_type = resolve_content_type(first)
         media_items = extract_media_items(messages)
 
@@ -191,12 +206,25 @@ def create_user_router(
                         )
                     )
                 else:
-                    copied = await media_bridge.copy_single(
-                        bot=first.bot,
-                        from_chat_id=first.chat.id,
-                        to_chat_id=settings.admin_chat_id,
-                        message_id=first.message_id,
-                    )
+                    if has_stale_footer(first):
+                        copied_id = (
+                            await copy_take_to_admin(
+                                first.bot,
+                                media_bridge,
+                                messages=[first],
+                                from_chat_id=first.chat.id,
+                                to_chat_id=settings.admin_chat_id,
+                            )
+                        )[0]
+                    else:
+                        copied_id = (
+                            await media_bridge.copy_single(
+                                bot=first.bot,
+                                from_chat_id=first.chat.id,
+                                to_chat_id=settings.admin_chat_id,
+                                message_id=first.message_id,
+                            )
+                        ).message_id
                     control = await first.bot.send_message(
                         chat_id=settings.admin_chat_id,
                         text=control_text,
@@ -210,10 +238,10 @@ def create_user_router(
                             user_chat_id=first.chat.id,
                             source_message_ids=source_message_ids,
                             is_media_group=False,
-                            admin_message_ids=[copied.message_id, control.message_id],
+                            admin_message_ids=[copied_id, control.message_id],
                             # Нужен fallback-путь публикации после рестарта без user chat_id:
                             # этот ID указывает на контентное сообщение в админ-чате.
-                            admin_content_message_ids=[copied.message_id],
+                            admin_content_message_ids=[copied_id],
                             control_message_id=control.message_id,
                             content_for_tagging=tagging_content,
                             single_content_text=single_content_text,
@@ -297,11 +325,12 @@ def create_user_router(
                         chat_id=settings.admin_chat_id,
                         text=f"Начало тейка из нескольких постов ({posts_count}) ↓",
                     )
-                    copied_ids = await media_bridge.copy_many(
-                        bot=first.bot,
+                    copied_ids = await copy_take_to_admin(
+                        first.bot,
+                        media_bridge,
+                        messages=messages,
                         from_chat_id=first.chat.id,
                         to_chat_id=settings.admin_chat_id,
-                        message_ids=source_message_ids,
                     )
                     end_marker = await first.bot.send_message(
                         chat_id=settings.admin_chat_id,
@@ -358,6 +387,7 @@ def create_user_router(
             key=lambda item: item.message_id,
         )
         pending_user_tasks.pop(user_chat_id, None)
+        messages = drop_duplicate_messages(messages)
         if messages:
             await submit_case(messages)
 
